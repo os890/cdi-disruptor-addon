@@ -19,6 +19,7 @@ import jakarta.enterprise.inject.Any;
 import jakarta.enterprise.inject.Default;
 import jakarta.enterprise.inject.spi.Annotated;
 import jakarta.enterprise.inject.spi.BeanManager;
+import org.os890.cdi.disruptor.RingBuffer;
 
 import java.lang.annotation.Annotation;
 import java.lang.annotation.Repeatable;
@@ -34,12 +35,13 @@ final class Qualifiers {
 
     /**
      * @param qualifiers qualifiers of an injection point or a fired event
-     * @return the given qualifiers without {@link Any} and {@link Default} - an empty set represents {@link Default}
+     * @return the given qualifiers without {@link Any}, {@link Default} and {@link RingBuffer} -
+     *         an empty set represents {@link Default}
      */
     static Set<Annotation> normalizeEventQualifiers(Collection<Annotation> qualifiers) {
         Set<Annotation> result = new HashSet<>();
         for (Annotation qualifier : qualifiers) {
-            if (!isAnyOrDefault(qualifier)) {
+            if (!isIgnoredForMatching(qualifier)) {
                 result.add(qualifier);
             }
         }
@@ -47,9 +49,9 @@ final class Qualifiers {
     }
 
     /**
-     * @param existingQualifiers normalized qualifiers
+     * @param existingQualifiers   normalized qualifiers
      * @param additionalQualifiers qualifiers to add
-     * @param beanManager current bean-manager
+     * @param beanManager          current bean-manager
      * @return the normalized union of both
      * @throws IllegalArgumentException for annotations which aren't qualifiers or for duplicated qualifiers
      */
@@ -62,7 +64,7 @@ final class Qualifiers {
             if (!beanManager.isQualifier(qualifierType)) {
                 throw new IllegalArgumentException(qualifierType.getName() + " isn't a qualifier");
             }
-            if (isAnyOrDefault(qualifier)) {
+            if (isIgnoredForMatching(qualifier)) {
                 continue;
             }
             if (!qualifierType.isAnnotationPresent(Repeatable.class)
@@ -75,7 +77,7 @@ final class Qualifiers {
     }
 
     /**
-     * @param annotated annotated element
+     * @param annotated   annotated element
      * @param beanManager current bean-manager
      * @return all qualifiers of the given element
      */
@@ -89,7 +91,31 @@ final class Qualifiers {
         return result;
     }
 
-    private static boolean isAnyOrDefault(Annotation qualifier) {
-        return qualifier.annotationType() == Any.class || qualifier.annotationType() == Default.class;
+    /**
+     * @param annotations qualifiers
+     * @return the {@link RingBuffer} qualifier or null
+     */
+    static RingBuffer ringBufferQualifier(Collection<Annotation> annotations) {
+        for (Annotation annotation : annotations) {
+            if (annotation instanceof RingBuffer ringBuffer) {
+                return ringBuffer;
+            }
+        }
+        return null;
+    }
+
+    /**
+     * @param annotations qualifiers
+     * @return the name of the selected ring-buffer
+     */
+    static String ringBufferName(Collection<Annotation> annotations) {
+        RingBuffer ringBuffer = ringBufferQualifier(annotations);
+        return ringBuffer == null ? RingBuffer.DEFAULT : ringBuffer.name();
+    }
+
+    // @RingBuffer selects the ring-buffer and isn't used for matching observers
+    private static boolean isIgnoredForMatching(Annotation qualifier) {
+        Class<? extends Annotation> qualifierType = qualifier.annotationType();
+        return qualifierType == Any.class || qualifierType == Default.class || qualifierType == RingBuffer.class;
     }
 }

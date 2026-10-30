@@ -92,12 +92,19 @@ class DisruptorEventTest {
         publisher.premiumOrderEvent().fire(new Order("2"));
 
         assertEquals(List.of("1", "2"), recorder.await(PremiumOrderObserver.PREMIUM_ORDERS, 2));
-        // new request-context per event
+        // new request-context per event (opt-in)
         assertEquals(List.of(1, 1), recorder.await(PremiumOrderObserver.REQUEST_COUNTS, 2));
         // the @Dependent observer instance gets destroyed after every notification
         assertEquals(2, recorder.await(PremiumOrderObserver.DESTROYED, 2).size());
         // DisruptorEvent as additional parameter of an observer method + static observer method
         assertEquals(List.of("premium:1", "premium:2"), recorder.await(TextObserver.TEXTS, 2));
+    }
+
+    @Test
+    void requestContextIsOptIn() throws InterruptedException {
+        publisher.orderEvent().fire(new Order("1"));
+
+        assertEquals(List.of(false), recorder.await(OrderObserver.REQUEST_CONTEXT_ACTIVE, 1));
     }
 
     @Test

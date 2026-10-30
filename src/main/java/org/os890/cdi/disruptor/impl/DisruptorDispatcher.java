@@ -23,7 +23,7 @@ import com.lmax.disruptor.TimeoutException;
 import com.lmax.disruptor.dsl.Disruptor;
 import jakarta.enterprise.context.control.RequestContextController;
 import jakarta.enterprise.inject.spi.BeanManager;
-import org.os890.cdi.disruptor.DisruptorConfig;
+import org.os890.cdi.disruptor.RingBufferSettings;
 
 import java.lang.annotation.Annotation;
 import java.time.Duration;
@@ -37,10 +37,11 @@ import java.util.logging.Level;
 import java.util.logging.Logger;
 
 /**
- * Publishes events to the ring-buffer and notifies the observer methods.
+ * Publishes events to a ring-buffer and notifies the observer methods of the ring-buffer.
  * <p>
  * Every observer method has its own {@link EventHandler}, which skips events it doesn't observe.
- * The observer methods which observe an event get resolved once per event-type and qualifiers.
+ * The observer methods which observe an event get resolved once per event-type and qualifiers
+ * (see {@link Publisher}).
  */
 final class DisruptorDispatcher {
     private static final Logger LOG = Logger.getLogger(DisruptorDispatcher.class.getName());
@@ -53,8 +54,8 @@ final class DisruptorDispatcher {
 
     private final BeanManager beanManager;
     private final List<DisruptorObserverMethod> observerMethods;
-    private final DisruptorConfig config;
-    private final Map<ResolutionKey, BitSet> resolvedRecipients = new ConcurrentHashMap<>();
+    private final RingBufferSettings settings;
+    private final Map<Set<Annotation>, Publisher> publishers = new ConcurrentHashMap<>();
 
     private Disruptor<EventSlot> disruptor;
     private volatile RingBuffer<EventSlot> ringBuffer;
@@ -62,16 +63,16 @@ final class DisruptorDispatcher {
 
     DisruptorDispatcher(BeanManager beanManager,
                         List<DisruptorObserverMethod> observerMethods,
-                        DisruptorConfig config) {
+                        RingBufferSettings settings) {
         this.beanManager = beanManager;
         this.observerMethods = List.copyOf(observerMethods);
-        this.config = config;
+        this.settings = settings;
     }
 
     synchronized void start() {
         if (!observerMethods.isEmpty()) {
-            disruptor = new Disruptor<>(EventSlot::new, config.ringBufferSize(), config.threadFactory(),
-                    config.producerType(), config.waitStrategy());
+            disruptor = new Disruptor<>(EventSlot::new, settings.ringBufferSize(), settings.threadFactory(),
+                    settings.producerType(), settings.waitStrategy());
             disruptor.setDefaultExceptionHandler(new LoggingExceptionHandler());
 
             ObserverEventHandler[] eventHandlers = new ObserverEventHandler[observerMethods.size()];
@@ -86,7 +87,7 @@ final class DisruptorDispatcher {
     }
 
     /**
-     * Stops accepting new events and waits (max. {@link DisruptorConfig#shutdownTimeout()})
+     * Stops accepting new events and waits (max. {@link RingBufferSettings#shutdownTimeout()})
      * until all pending events are processed.
      */
     synchronized void stop() {
@@ -96,47 +97,69 @@ final class DisruptorDispatcher {
         running = false;
 
         if (disruptor != null) {
-            Duration timeout = config.shutdownTimeout();
+            Duration timeout = settings.shutdownTimeout();
             try {
                 disruptor.shutdown(timeout.toMillis(), TimeUnit.MILLISECONDS);
             } catch (TimeoutException e) {
-                LOG.warning("pending events weren't processed within " + timeout + " - halting the disruptor");
+                LOG.warning("pending events of the ring-buffer '" + settings.name() + "' weren't processed within "
+                        + timeout + " - halting the disruptor");
                 disruptor.halt();
             }
         }
     }
 
-    boolean dispatch(Object event, Set<Annotation> qualifiers, boolean waitForCapacity) {
-        if (event == null) {
-            throw new IllegalArgumentException("the event must not be null");
-        }
-        if (!running) {
-            throw new IllegalStateException("the disruptor isn't running");
-        }
-
-        BitSet recipients = resolvedRecipients.computeIfAbsent(
-                new ResolutionKey(event.getClass(), qualifiers), this::resolveRecipients);
-        if (recipients.isEmpty()) {
-            return true;
-        }
-        if (waitForCapacity) {
-            ringBuffer.publishEvent(EVENT_TRANSLATOR, event, recipients);
-            return true;
-        }
-        return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
+    /**
+     * @param qualifiers normalized qualifiers of the events
+     * @return publisher for events with the given qualifiers (cached - the lookup is only needed once per
+     *         {@link org.os890.cdi.disruptor.DisruptorEvent} instance)
+     */
+    Publisher publisher(Set<Annotation> qualifiers) {
+        return publishers.computeIfAbsent(qualifiers, Publisher::new);
     }
 
-    private BitSet resolveRecipients(ResolutionKey key) {
-        BitSet result = new BitSet(observerMethods.size());
-        for (int i = 0; i < observerMethods.size(); i++) {
-            if (observerMethods.get(i).observes(key.eventType(), key.qualifiers())) {
-                result.set(i);
+    /**
+     * Hot path of firing events - resolves the observers once per event-type and avoids allocations.
+     */
+    final class Publisher {
+        private final Set<Annotation> qualifiers;
+        private final Map<Class<?>, BitSet> recipientsByEventType = new ConcurrentHashMap<>();
+
+        private Publisher(Set<Annotation> qualifiers) {
+            this.qualifiers = qualifiers;
+        }
+
+        boolean publish(Object event, boolean waitForCapacity) {
+            if (event == null) {
+                throw new IllegalArgumentException("the event must not be null");
             }
-        }
-        return result;
-    }
+            if (!running) {
+                throw new IllegalStateException("the ring-buffer '" + settings.name() + "' isn't running");
+            }
 
-    private record ResolutionKey(Class<?> eventType, Set<Annotation> qualifiers) {
+            Class<?> eventType = event.getClass();
+            BitSet recipients = recipientsByEventType.get(eventType);
+            if (recipients == null) {
+                recipients = recipientsByEventType.computeIfAbsent(eventType, this::resolveRecipients);
+            }
+            if (recipients.isEmpty()) {
+                return true;
+            }
+            if (waitForCapacity) {
+                ringBuffer.publishEvent(EVENT_TRANSLATOR, event, recipients);
+                return true;
+            }
+            return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
+        }
+
+        private BitSet resolveRecipients(Class<?> eventType) {
+            BitSet result = new BitSet(observerMethods.size());
+            for (int i = 0; i < observerMethods.size(); i++) {
+                if (observerMethods.get(i).observes(eventType, qualifiers)) {
+                    result.set(i);
+                }
+            }
+            return result;
+        }
     }
 
     /**
@@ -156,7 +179,7 @@ final class DisruptorDispatcher {
         private final int index;
         private final DisruptorObserverMethod observerMethod;
 
-        // only used by the thread of this handler
+        // only used by the thread of this handler (and only for observer methods which require it)
         private RequestContextController requestContextController;
 
         ObserverEventHandler(int index, DisruptorObserverMethod observerMethod) {
@@ -170,19 +193,30 @@ final class DisruptorDispatcher {
                 return;
             }
 
+            if (!observerMethod.isRequestContextRequired()) {
+                notifyObserverMethod(slot, sequence);
+                return;
+            }
+
             if (requestContextController == null) {
                 requestContextController = beanManager.createInstance().select(RequestContextController.class).get();
             }
             boolean activated = requestContextController.activate();
             try {
-                observerMethod.notify(slot.payload);
-            } catch (Exception e) {
-                LOG.log(Level.SEVERE, "observer method " + observerMethod + " failed to process event "
-                        + slot.payload + " (sequence " + sequence + ")", e);
+                notifyObserverMethod(slot, sequence);
             } finally {
                 if (activated) {
                     requestContextController.deactivate();
                 }
+            }
+        }
+
+        private void notifyObserverMethod(EventSlot slot, long sequence) {
+            try {
+                observerMethod.notify(slot.payload);
+            } catch (Exception e) {
+                LOG.log(Level.SEVERE, "observer method " + observerMethod + " failed to process event "
+                        + slot.payload + " (sequence " + sequence + ")", e);
             }
         }
     }

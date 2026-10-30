@@ -27,6 +27,7 @@ import jakarta.enterprise.inject.spi.DefinitionException;
 import jakarta.enterprise.inject.spi.InjectionPoint;
 import org.os890.cdi.disruptor.DisruptorEvent;
 import org.os890.cdi.disruptor.ObservesDisruptor;
+import org.os890.cdi.disruptor.RingBuffer;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.InvocationTargetException;
@@ -34,8 +35,10 @@ import java.lang.reflect.Method;
 import java.lang.reflect.Modifier;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
+import java.util.Arrays;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.stream.Collectors;
 
@@ -55,10 +58,16 @@ final class DisruptorObserverMethod {
     private final boolean dependentBean;
     private final Type beanType;
     private final int eventParameterPosition;
+    private final String ringBufferName;
+    private final boolean requestContextRequired;
     private final Class<?> observedType;
     private final Set<Annotation> observedQualifiers;
     private final InjectionPoint[] injectionPoints;
     private final DisruptorEvent<?>[] disruptorEventArguments;
+    // without injection points and dependent instances no creational-context is needed
+    private final boolean creationalContextRequired;
+    // only used for observer methods without injection points - by the single event-handler thread of this method
+    private final Object[] reusableArguments;
 
     private volatile Object contextualReference;
 
@@ -85,8 +94,9 @@ final class DisruptorObserverMethod {
                 eventPosition = position;
             } else if (rawType(parameter.getBaseType()) == DisruptorEvent.class) {
                 // injection points of observer methods aren't processed by the container - see ProcessInjectionPoint
+                Set<Annotation> qualifiers = Qualifiers.qualifiersOf(parameter, beanManager);
                 disruptorEventArguments[position] = new DisruptorEventImpl<>(extension,
-                        Qualifiers.normalizeEventQualifiers(Qualifiers.qualifiersOf(parameter, beanManager)));
+                        Qualifiers.ringBufferName(qualifiers), Qualifiers.normalizeEventQualifiers(qualifiers));
             } else {
                 // BeanManager#createInjectionPoint isn't used, because some containers (e.g. OWB) would fire
                 // ProcessInjectionPoint after the deployment
@@ -97,11 +107,21 @@ final class DisruptorObserverMethod {
             }
         }
         this.eventParameterPosition = eventPosition;
+        this.creationalContextRequired = dependentBean
+                || Arrays.stream(injectionPoints).anyMatch(Objects::nonNull);
+        // Object[] (and not a clone of DisruptorEvent[]) to allow storing the event
+        this.reusableArguments = creationalContextRequired
+                ? null : Arrays.copyOf(disruptorEventArguments, disruptorEventArguments.length, Object[].class);
 
         AnnotatedParameter<?> eventParameter = parameters.get(eventPosition);
         this.observedType = boxed(rawType(eventParameter.getBaseType()));
-        this.observedQualifiers = Qualifiers.qualifiersOf(eventParameter, beanManager).stream()
-                .filter(qualifier -> qualifier.annotationType() != Any.class)
+        this.requestContextRequired = eventParameter.getAnnotation(ObservesDisruptor.class).requestContext();
+        Set<Annotation> eventParameterQualifiers = Qualifiers.qualifiersOf(eventParameter, beanManager);
+        this.ringBufferName = Qualifiers.ringBufferName(eventParameterQualifiers);
+        // @RingBuffer selects the ring-buffer and isn't used for matching events
+        this.observedQualifiers = eventParameterQualifiers.stream()
+                .filter(qualifier -> qualifier.annotationType() != Any.class
+                    && qualifier.annotationType() != RingBuffer.class)
                 .collect(Collectors.toUnmodifiableSet());
     }
 
@@ -138,6 +158,14 @@ final class DisruptorObserverMethod {
         }
     }
 
+    String ringBufferName() {
+        return ringBufferName;
+    }
+
+    boolean isRequestContextRequired() {
+        return requestContextRequired;
+    }
+
     boolean observes(Class<?> eventType, Set<Annotation> eventQualifiers) {
         if (!observedType.isAssignableFrom(eventType)) {
             return false;
@@ -155,7 +183,23 @@ final class DisruptorObserverMethod {
         return true;
     }
 
+    /**
+     * Must only be called by the event-handler thread of this observer method.
+     *
+     * @param event the event
+     * @throws Exception exception of the observer method
+     */
     void notify(Object event) throws Exception {
+        if (!creationalContextRequired) {
+            reusableArguments[eventParameterPosition] = event;
+            try {
+                invoke(staticMethod ? null : contextualReference(), reusableArguments);
+            } finally {
+                reusableArguments[eventParameterPosition] = null;
+            }
+            return;
+        }
+
         CreationalContext<?> argumentsContext = beanManager.createCreationalContext(null);
         try {
             Object[] arguments = new Object[injectionPoints.length];

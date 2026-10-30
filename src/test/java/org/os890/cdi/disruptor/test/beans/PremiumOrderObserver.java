@@ -30,7 +30,7 @@ public class PremiumOrderObserver {
     @Inject
     private EventRecorder recorder;
 
-    void onPremiumOrder(@ObservesDisruptor @Premium Order order,
+    void onPremiumOrder(@ObservesDisruptor(requestContext = true) @Premium Order order,
                         RequestCounter requestCounter,
                         DisruptorEvent<CharSequence> textEvent) {
         recorder.record(REQUEST_COUNTS, requestCounter.increment());

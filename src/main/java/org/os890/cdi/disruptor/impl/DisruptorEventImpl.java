@@ -17,11 +17,13 @@ package org.os890.cdi.disruptor.impl;
 
 import jakarta.enterprise.inject.spi.CDI;
 import org.os890.cdi.disruptor.DisruptorEvent;
+import org.os890.cdi.disruptor.RingBuffer;
 
 import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.Serializable;
 import java.lang.annotation.Annotation;
+import java.util.Arrays;
 import java.util.Set;
 
 /**
@@ -32,40 +34,65 @@ import java.util.Set;
 final class DisruptorEventImpl<T> implements DisruptorEvent<T>, Serializable {
     private static final long serialVersionUID = 1L;
 
+    private final String ringBufferName;
     private final Set<Annotation> qualifiers;
 
     private transient DisruptorExtension extension;
 
-    DisruptorEventImpl(DisruptorExtension extension, Set<Annotation> qualifiers) {
+    // racy single-check idiom: the publisher is thread-safe and its fields are final
+    private transient DisruptorDispatcher.Publisher publisher;
+
+    DisruptorEventImpl(DisruptorExtension extension, String ringBufferName, Set<Annotation> qualifiers) {
         this.extension = extension;
+        this.ringBufferName = ringBufferName;
         this.qualifiers = qualifiers;
     }
 
     @Override
     public void fire(T event) {
-        extension.dispatcher().dispatch(event, qualifiers, true);
+        publisher().publish(event, true);
     }
 
     @Override
     public boolean tryFire(T event) {
-        return extension.dispatcher().dispatch(event, qualifiers, false);
+        return publisher().publish(event, false);
     }
 
     @Override
     public DisruptorEvent<T> select(Annotation... additionalQualifiers) {
-        return new DisruptorEventImpl<>(extension,
-                Qualifiers.merge(qualifiers, additionalQualifiers, extension.beanManager()));
+        return child(additionalQualifiers);
     }
 
     @Override
     public <U extends T> DisruptorEvent<U> select(Class<U> subtype, Annotation... additionalQualifiers) {
-        return new DisruptorEventImpl<>(extension,
-                Qualifiers.merge(qualifiers, additionalQualifiers, extension.beanManager()));
+        return child(additionalQualifiers);
     }
 
     @Override
     public String toString() {
-        return "DisruptorEvent" + qualifiers;
+        return "DisruptorEvent[ringBuffer=" + ringBufferName + ", qualifiers=" + qualifiers + "]";
+    }
+
+    private DisruptorDispatcher.Publisher publisher() {
+        DisruptorDispatcher.Publisher result = publisher;
+        if (result == null) {
+            result = extension.dispatcher(ringBufferName).publisher(qualifiers);
+            publisher = result;
+        }
+        return result;
+    }
+
+    private <U> DisruptorEventImpl<U> child(Annotation[] additionalQualifiers) {
+        String childRingBufferName = ringBufferName;
+        RingBuffer ringBuffer = Qualifiers.ringBufferQualifier(Arrays.asList(additionalQualifiers));
+        if (ringBuffer != null) {
+            if (!RingBuffer.DEFAULT.equals(ringBufferName) && !ringBufferName.equals(ringBuffer.name())) {
+                throw new IllegalArgumentException("the ring-buffer '" + ringBufferName + "' is already selected");
+            }
+            childRingBufferName = ringBuffer.name();
+        }
+        return new DisruptorEventImpl<>(extension, childRingBufferName,
+            Qualifiers.merge(qualifiers, additionalQualifiers, extension.beanManager()));
     }
 
     private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {

@@ -21,5 +21,7 @@
     <scan>
         <!-- invalid definitions get added explicitly by the tests which expect a failing deployment -->
         <exclude name="org.os890.cdi.disruptor.test.invalid.**"/>
+        <!-- added explicitly by the throughput test -->
+        <exclude name="org.os890.cdi.disruptor.test.perf.**"/>
     </scan>
 </beans>

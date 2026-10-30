@@ -19,15 +19,16 @@ import jakarta.enterprise.context.ApplicationScoped;
 import jakarta.enterprise.context.BeforeDestroyed;
 import jakarta.enterprise.context.Dependent;
 import jakarta.enterprise.event.Observes;
-import jakarta.enterprise.inject.Instance;
 import jakarta.enterprise.inject.spi.AfterBeanDiscovery;
 import jakarta.enterprise.inject.spi.AfterDeploymentValidation;
 import jakarta.enterprise.inject.spi.AnnotatedMethod;
+import jakarta.enterprise.inject.spi.AnnotatedParameter;
 import jakarta.enterprise.inject.spi.Bean;
 import jakarta.enterprise.inject.spi.BeanManager;
 import jakarta.enterprise.inject.spi.BeforeBeanDiscovery;
 import jakarta.enterprise.inject.spi.BeforeShutdown;
 import jakarta.enterprise.inject.spi.DefinitionException;
+import jakarta.enterprise.inject.spi.DeploymentException;
 import jakarta.enterprise.inject.spi.Extension;
 import jakarta.enterprise.inject.spi.InjectionPoint;
 import jakarta.enterprise.inject.spi.ProcessInjectionPoint;
@@ -35,12 +36,16 @@ import jakarta.enterprise.inject.spi.ProcessManagedBean;
 import org.os890.cdi.disruptor.DisruptorConfig;
 import org.os890.cdi.disruptor.DisruptorEvent;
 import org.os890.cdi.disruptor.ObservesDisruptor;
+import org.os890.cdi.disruptor.RingBuffer;
+import org.os890.cdi.disruptor.RingBufferSettings;
 
 import java.lang.annotation.Annotation;
 import java.lang.reflect.GenericArrayType;
+import java.lang.reflect.Member;
 import java.lang.reflect.ParameterizedType;
 import java.lang.reflect.Type;
 import java.util.ArrayList;
+import java.util.Collection;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -50,19 +55,25 @@ import java.util.Set;
 /**
  * Portable extension which
  * <ul>
- * <li>registers a bean for every {@link DisruptorEvent} injection point (one per distinct set of qualifiers)</li>
+ * <li>registers a bean for every {@link DisruptorEvent} injection point
+ *     (one per ring-buffer and distinct set of qualifiers)</li>
  * <li>collects all observer methods with a parameter annotated with {@link ObservesDisruptor}</li>
- * <li>starts the disruptor after the deployment and stops it before the application-context gets destroyed</li>
+ * <li>collects the configuration of all ring-buffers (see {@link RingBuffer})</li>
+ * <li>starts one disruptor per ring-buffer after the deployment and stops them before the
+ *     application-context gets destroyed</li>
  * </ul>
  */
 public class DisruptorExtension implements Extension {
     private final List<ObserverDefinition> observerDefinitions = new ArrayList<>();
-    private final Map<Set<Annotation>, Integer> channelIds = new HashMap<>();
-    private final List<Set<Annotation>> channelQualifiers = new ArrayList<>();
+    private final Map<Channel, Integer> channelIds = new HashMap<>();
+    private final List<Channel> channels = new ArrayList<>();
     private final List<Set<Type>> channelTypes = new ArrayList<>();
+    private final Map<String, RingBufferDeclaration> ringBufferDeclarations = new HashMap<>();
 
     private volatile BeanManager beanManager;
-    private volatile DisruptorDispatcher dispatcher;
+    private volatile Map<String, DisruptorDispatcher> dispatchers;
+    // events for ring-buffers which are only referenced at runtime (via DisruptorEvent#select) have no observers
+    private volatile DisruptorDispatcher undeclaredRingBufferDispatcher;
 
     void init(@Observes BeforeBeanDiscovery beforeBeanDiscovery, BeanManager beanManager) {
         this.beanManager = beanManager;
@@ -76,17 +87,26 @@ public class DisruptorExtension implements Extension {
         }
         if (!(type instanceof ParameterizedType parameterizedType)
                 || !isConcrete(parameterizedType.getActualTypeArguments()[0])) {
-            event.addDefinitionError(new DefinitionException("invalid injection point " + injectionPoint
+            event.addDefinitionError(new DefinitionException("invalid injection point " + describe(injectionPoint)
                     + " - the type parameter of " + DisruptorEvent.class.getSimpleName()
                     + " has to be a concrete type"));
             return;
         }
 
-        Set<Annotation> qualifiers = Qualifiers.normalizeEventQualifiers(injectionPoint.getQualifiers());
-        int channelId = channelIds.computeIfAbsent(qualifiers, newQualifiers -> {
-            channelQualifiers.add(newQualifiers);
+        Set<Annotation> qualifiers = injectionPoint.getQualifiers();
+        try {
+            declareRingBuffer(qualifiers, describe(injectionPoint));
+        } catch (DefinitionException e) {
+            event.addDefinitionError(e);
+            return;
+        }
+
+        Channel channel = new Channel(Qualifiers.ringBufferName(qualifiers),
+                Qualifiers.normalizeEventQualifiers(qualifiers));
+        int channelId = channelIds.computeIfAbsent(channel, newChannel -> {
+            channels.add(newChannel);
             channelTypes.add(new HashSet<>());
-            return channelQualifiers.size() - 1;
+            return channels.size() - 1;
         });
         channelTypes.get(channelId).add(type);
 
@@ -105,6 +125,13 @@ public class DisruptorExtension implements Extension {
 
             try {
                 DisruptorObserverMethod.validateDefinition(bean, method, beanManager);
+                for (AnnotatedParameter<?> parameter : method.getParameters()) {
+                    if (parameter.isAnnotationPresent(ObservesDisruptor.class)
+                            || isDisruptorEventType(parameter.getBaseType())) {
+                        declareRingBuffer(Qualifiers.qualifiersOf(parameter, beanManager),
+                                describe(method.getJavaMember()));
+                    }
+                }
                 observerDefinitions.add(new ObserverDefinition(bean, method));
             } catch (DefinitionException e) {
                 event.addDefinitionError(e);
@@ -113,8 +140,8 @@ public class DisruptorExtension implements Extension {
     }
 
     synchronized void registerDisruptorEventBeans(@Observes AfterBeanDiscovery afterBeanDiscovery) {
-        for (int channelId = 0; channelId < channelQualifiers.size(); channelId++) {
-            Set<Annotation> qualifiers = channelQualifiers.get(channelId);
+        for (int channelId = 0; channelId < channels.size(); channelId++) {
+            Channel channel = channels.get(channelId);
             Set<Type> types = new HashSet<>(channelTypes.get(channelId));
             types.add(Object.class);
 
@@ -124,18 +151,22 @@ public class DisruptorExtension implements Extension {
                     .types(types)
                     .qualifiers(new DisruptorEventChannel.Literal(channelId))
                     .scope(Dependent.class)
-                    .createWith(creationalContext -> new DisruptorEventImpl<>(this, qualifiers));
+                    .createWith(creationalContext ->
+                        new DisruptorEventImpl<>(this, channel.ringBufferName(), channel.qualifiers()));
         }
     }
 
-    synchronized void startDispatcher(@Observes AfterDeploymentValidation afterDeploymentValidation,
-                                      BeanManager beanManager) {
-        List<DisruptorObserverMethod> observerMethods = new ArrayList<>(observerDefinitions.size());
+    synchronized void startDispatchers(@Observes AfterDeploymentValidation afterDeploymentValidation,
+                                       BeanManager beanManager) {
         boolean valid = true;
+
+        Map<String, List<DisruptorObserverMethod>> observerMethods = new HashMap<>();
         for (ObserverDefinition definition : observerDefinitions) {
             try {
-                observerMethods.add(new DisruptorObserverMethod(
-                        definition.bean(), definition.method(), this, beanManager));
+                DisruptorObserverMethod observerMethod =
+                        new DisruptorObserverMethod(definition.bean(), definition.method(), this, beanManager);
+                observerMethods.computeIfAbsent(observerMethod.ringBufferName(), name -> new ArrayList<>())
+                        .add(observerMethod);
             } catch (RuntimeException e) {
                 afterDeploymentValidation.addDeploymentProblem(e);
                 valid = false;
@@ -143,21 +174,38 @@ public class DisruptorExtension implements Extension {
         }
         observerDefinitions.clear();
 
+        ringBufferDeclarations.computeIfAbsent(RingBuffer.DEFAULT, RingBufferDeclaration::new);
+        List<DisruptorConfig> configs = resolveConfigs(beanManager);
+        Map<String, DisruptorDispatcher> newDispatchers = new HashMap<>();
+        for (RingBufferDeclaration declaration : ringBufferDeclarations.values()) {
+            String name = declaration.name();
+            try {
+                newDispatchers.put(name, new DisruptorDispatcher(beanManager,
+                        observerMethods.getOrDefault(name, List.of()), resolveSettings(declaration, configs)));
+            } catch (RuntimeException e) {
+                afterDeploymentValidation.addDeploymentProblem(new DeploymentException("invalid configuration of the"
+                        + " ring-buffer '" + name + "' declared at " + declaration.declaredAt(), e));
+                valid = false;
+            }
+        }
+
         if (valid) {
-            DisruptorDispatcher newDispatcher =
-                    new DisruptorDispatcher(beanManager, observerMethods, resolveConfig(beanManager));
-            newDispatcher.start();
-            dispatcher = newDispatcher;
+            newDispatchers.values().forEach(DisruptorDispatcher::start);
+            DisruptorDispatcher emptyDispatcher =
+                    new DisruptorDispatcher(beanManager, List.of(), new RingBufferSettings("undeclared"));
+            emptyDispatcher.start();
+            undeclaredRingBufferDispatcher = emptyDispatcher;
+            dispatchers = Map.copyOf(newDispatchers);
         }
     }
 
     // stop before the application-context gets destroyed to allow application-scoped observers to process
     // pending events
-    void stopDispatcher(@Observes @BeforeDestroyed(ApplicationScoped.class) Object event) {
+    void stopDispatchers(@Observes @BeforeDestroyed(ApplicationScoped.class) Object event) {
         stop();
     }
 
-    void stopDispatcher(@Observes BeforeShutdown event) {
+    void stopDispatchers(@Observes BeforeShutdown event) {
         stop();
     }
 
@@ -165,31 +213,66 @@ public class DisruptorExtension implements Extension {
         return beanManager;
     }
 
-    DisruptorDispatcher dispatcher() {
-        DisruptorDispatcher result = dispatcher;
-        if (result == null) {
+    DisruptorDispatcher dispatcher(String ringBufferName) {
+        Map<String, DisruptorDispatcher> currentDispatchers = dispatchers;
+        if (currentDispatchers == null) {
             throw new IllegalStateException("the disruptor isn't started - events can be fired after the deployment");
+        }
+        DisruptorDispatcher result = currentDispatchers.get(ringBufferName);
+        return result != null ? result : undeclaredRingBufferDispatcher;
+    }
+
+    private void stop() {
+        Map<String, DisruptorDispatcher> currentDispatchers = dispatchers;
+        if (currentDispatchers != null) {
+            currentDispatchers.values().forEach(DisruptorDispatcher::stop);
+            undeclaredRingBufferDispatcher.stop();
+        }
+    }
+
+    private void declareRingBuffer(Collection<Annotation> qualifiers, String source) {
+        RingBuffer ringBuffer = Qualifiers.ringBufferQualifier(qualifiers);
+        String name = Qualifiers.ringBufferName(qualifiers);
+        if (name.isBlank()) {
+            throw new DefinitionException("the name of @" + RingBuffer.class.getSimpleName()
+                    + " must not be blank - declared at " + source);
+        }
+
+        RingBufferDeclaration declaration = ringBufferDeclarations.computeIfAbsent(name, RingBufferDeclaration::new);
+        if (ringBuffer != null) {
+            declaration.merge(ringBuffer, source);
+        }
+    }
+
+    // later entries override former ones - see RingBuffer
+    private static RingBufferSettings resolveSettings(RingBufferDeclaration declaration,
+                                                      List<DisruptorConfig> configs) {
+        RingBufferSettings settings = new RingBufferSettings(declaration.name());
+        declaration.applyTo(settings);
+        MicroProfileConfigSupport.applyTo(settings);
+        for (DisruptorConfig config : configs) {
+            config.configure(settings);
+        }
+        return settings;
+    }
+
+    private static List<DisruptorConfig> resolveConfigs(BeanManager beanManager) {
+        List<DisruptorConfig> result = new ArrayList<>();
+        for (DisruptorConfig config : beanManager.createInstance().select(DisruptorConfig.class)) {
+            result.add(config);
         }
         return result;
     }
 
-    private void stop() {
-        DisruptorDispatcher current = dispatcher;
-        if (current != null) {
-            current.stop();
-        }
+    private static String describe(InjectionPoint injectionPoint) {
+        return describe(injectionPoint.getMember());
     }
 
-    private static DisruptorConfig resolveConfig(BeanManager beanManager) {
-        Instance<DisruptorConfig> configInstance = beanManager.createInstance().select(DisruptorConfig.class);
-        if (configInstance.isResolvable()) {
-            return configInstance.get();
-        }
-        return new DisruptorConfig() {
-        };
+    private static String describe(Member member) {
+        return member.getDeclaringClass().getName() + "#" + member.getName();
     }
 
-    private static boolean isDisruptorEventType(Type type) {
+    static boolean isDisruptorEventType(Type type) {
         return type == DisruptorEvent.class || (type instanceof ParameterizedType parameterizedType
                 && parameterizedType.getRawType() == DisruptorEvent.class);
     }
@@ -214,5 +297,8 @@ public class DisruptorExtension implements Extension {
     }
 
     private record ObserverDefinition(Bean<?> bean, AnnotatedMethod<?> method) {
+    }
+
+    private record Channel(String ringBufferName, Set<Annotation> qualifiers) {
     }
 }

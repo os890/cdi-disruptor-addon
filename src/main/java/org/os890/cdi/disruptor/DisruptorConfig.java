@@ -15,67 +15,28 @@
  */
 package org.os890.cdi.disruptor;
 
-import com.lmax.disruptor.BlockingWaitStrategy;
-import com.lmax.disruptor.WaitStrategy;
-import com.lmax.disruptor.dsl.ProducerType;
-
-import java.time.Duration;
-import java.util.concurrent.ThreadFactory;
-import java.util.concurrent.atomic.AtomicInteger;
-
 /**
- * Configuration of the disruptor.
+ * Programmatic configuration of ring-buffers.
  * <p>
- * Provide a bean which implements this interface to override the defaults, e.g.:
+ * All beans implementing this interface get invoked once per ring-buffer during the bootstrapping of the
+ * container. They are applied last, therefore they can override values of {@link RingBuffer} and
+ * MicroProfile Config, e.g.:
  * <pre>
  * &#064;ApplicationScoped
  * public class LowLatencyConfig implements DisruptorConfig {
  *     &#064;Override
- *     public WaitStrategy waitStrategy() {
- *         return new BusySpinWaitStrategy();
+ *     public void configure(RingBufferSettings settings) {
+ *         if ("market-data".equals(settings.name())) {
+ *             settings.waitStrategy(new BusySpinWaitStrategy());
+ *         }
  *     }
  * }
  * </pre>
- * The configuration is read once during the bootstrapping of the container.
  */
 public interface DisruptorConfig {
     /**
-     * @return size of the ring-buffer (has to be a power of 2)
+     * @param settings settings of a ring-buffer, which already contain the values of {@link RingBuffer}
+     *                 and MicroProfile Config
      */
-    default int ringBufferSize() {
-        return 1024;
-    }
-
-    /**
-     * @return wait-strategy used by the event-handlers (one per observer method)
-     */
-    default WaitStrategy waitStrategy() {
-        return new BlockingWaitStrategy();
-    }
-
-    /**
-     * @return {@link ProducerType#MULTI} if events get fired by multiple threads
-     */
-    default ProducerType producerType() {
-        return ProducerType.MULTI;
-    }
-
-    /**
-     * @return max. time to wait for the processing of pending events during the shutdown of the container
-     */
-    default Duration shutdownTimeout() {
-        return Duration.ofSeconds(10);
-    }
-
-    /**
-     * @return factory for the threads of the event-handlers (one thread per observer method)
-     */
-    default ThreadFactory threadFactory() {
-        AtomicInteger threadCount = new AtomicInteger();
-        return runnable -> {
-            Thread thread = new Thread(runnable, "cdi-disruptor-observer-" + threadCount.incrementAndGet());
-            thread.setDaemon(true);
-            return thread;
-        };
-    }
+    void configure(RingBufferSettings settings);
 }

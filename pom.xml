@@ -20,12 +20,13 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.os890.cdi</groupId>
-    <artifactId>lasync-cdi</artifactId>
+    <artifactId>cdi-disruptor-addon</artifactId>
     <version>1.0.0-SNAPSHOT</version>
     <packaging>jar</packaging>
 
-    <name>lasync-cdi</name>
+    <name>cdi-disruptor-addon</name>
     <description>Portable CDI extension which dispatches events via the LMAX Disruptor</description>
+    <url>https://github.com/os890/cdi-disruptor-addon</url>
 
     <licenses>
         <license>
@@ -35,6 +36,12 @@
         </license>
     </licenses>
 
+    <scm>
+        <url>https://github.com/os890/cdi-disruptor-addon</url>
+        <connection>scm:git:https://github.com/os890/cdi-disruptor-addon.git</connection>
+        <developerConnection>scm:git:https://github.com/os890/cdi-disruptor-addon.git</developerConnection>
+    </scm>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
@@ -43,7 +50,9 @@
         <disruptor.version>4.0.0</disruptor.version>
         <weld.version>5.1.4.Final</weld.version>
         <owb.version>4.0.3</owb.version>
+        <microprofile-config.version>3.1</microprofile-config.version>
         <junit.version>5.11.4</junit.version>
+        <smallrye-config.version>3.10.2</smallrye-config.version>
 
         <checkstyle.version>10.26.1</checkstyle.version>
     </properties>
@@ -60,11 +69,24 @@
             <artifactId>disruptor</artifactId>
             <version>${disruptor.version}</version>
         </dependency>
+        <!-- optional - used for the configuration of ring-buffers if available -->
+        <dependency>
+            <groupId>org.eclipse.microprofile.config</groupId>
+            <artifactId>microprofile-config-api</artifactId>
+            <version>${microprofile-config.version}</version>
+            <scope>provided</scope>
+        </dependency>
 
         <dependency>
             <groupId>org.junit.jupiter</groupId>
             <artifactId>junit-jupiter</artifactId>
             <version>${junit.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <dependency>
+            <groupId>io.smallrye.config</groupId>
+            <artifactId>smallrye-config-core</artifactId>
+            <version>${smallrye-config.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
@@ -80,6 +102,21 @@
                 <groupId>org.apache.maven.plugins</groupId>
                 <artifactId>maven-surefire-plugin</artifactId>
                 <version>3.5.2</version>
+                <executions>
+                    <!-- MicroProfile Config is optional - all tests have to pass without it -->
+                    <execution>
+                        <id>without-microprofile-config</id>
+                        <goals>
+                            <goal>test</goal>
+                        </goals>
+                        <configuration>
+                            <classpathDependencyExcludes>
+                                <classpathDependencyExclude>org.eclipse.microprofile.config:microprofile-config-api</classpathDependencyExclude>
+                            </classpathDependencyExcludes>
+                            <reportsDirectory>${project.build.directory}/surefire-reports-without-microprofile-config</reportsDirectory>
+                        </configuration>
+                    </execution>
+                </executions>
             </plugin>
 
             <!-- guard: every file needs an approved license header -->

@@ -36,7 +36,16 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
  * </pre>
  * Qualifiers of the event parameter restrict the observed events (like for CDI observers).
  * All other parameters are injection points.
- * The method gets invoked on a thread of the disruptor with an active request-context.
+ * The method gets invoked on a thread of the disruptor (one thread per observer method).
+ * <p>
+ * Unlike CDI async observers, the request-context isn't active by default, because activating it per
+ * event is several times more expensive than the dispatching itself. Use {@code requestContext = true}
+ * for observers which need {@link jakarta.enterprise.context.RequestScoped} beans:
+ * <pre>
+ * void onOrder(&#064;ObservesDisruptor(requestContext = true) OrderPlaced event, RequestScopedAudit audit) {
+ *     // ...
+ * }
+ * </pre>
  * <p>
  * Restrictions:
  * <ul>
@@ -50,4 +59,8 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
 @Retention(RUNTIME)
 @Documented
 public @interface ObservesDisruptor {
+    /**
+     * @return true to activate a new request-context for every notification of the observer method
+     */
+    boolean requestContext() default false;
 }
