@@ -1,0 +1,95 @@
+/*
+ * Copyright 2026 os890
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.os890.cdi.disruptor.impl;
+
+import jakarta.enterprise.inject.Any;
+import jakarta.enterprise.inject.Default;
+import jakarta.enterprise.inject.spi.Annotated;
+import jakarta.enterprise.inject.spi.BeanManager;
+
+import java.lang.annotation.Annotation;
+import java.lang.annotation.Repeatable;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.HashSet;
+import java.util.Set;
+
+final class Qualifiers {
+    private Qualifiers() {
+        // utility class
+    }
+
+    /**
+     * @param qualifiers qualifiers of an injection point or a fired event
+     * @return the given qualifiers without {@link Any} and {@link Default} - an empty set represents {@link Default}
+     */
+    static Set<Annotation> normalizeEventQualifiers(Collection<Annotation> qualifiers) {
+        Set<Annotation> result = new HashSet<>();
+        for (Annotation qualifier : qualifiers) {
+            if (!isAnyOrDefault(qualifier)) {
+                result.add(qualifier);
+            }
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    /**
+     * @param existingQualifiers normalized qualifiers
+     * @param additionalQualifiers qualifiers to add
+     * @param beanManager current bean-manager
+     * @return the normalized union of both
+     * @throws IllegalArgumentException for annotations which aren't qualifiers or for duplicated qualifiers
+     */
+    static Set<Annotation> merge(Set<Annotation> existingQualifiers,
+                                 Annotation[] additionalQualifiers,
+                                 BeanManager beanManager) {
+        Set<Annotation> result = new HashSet<>(existingQualifiers);
+        for (Annotation qualifier : additionalQualifiers) {
+            Class<? extends Annotation> qualifierType = qualifier.annotationType();
+            if (!beanManager.isQualifier(qualifierType)) {
+                throw new IllegalArgumentException(qualifierType.getName() + " isn't a qualifier");
+            }
+            if (isAnyOrDefault(qualifier)) {
+                continue;
+            }
+            if (!qualifierType.isAnnotationPresent(Repeatable.class)
+                    && result.stream().anyMatch(existing -> existing.annotationType() == qualifierType)) {
+                throw new IllegalArgumentException("duplicated qualifier " + qualifierType.getName());
+            }
+            result.add(qualifier);
+        }
+        return Collections.unmodifiableSet(result);
+    }
+
+    /**
+     * @param annotated annotated element
+     * @param beanManager current bean-manager
+     * @return all qualifiers of the given element
+     */
+    static Set<Annotation> qualifiersOf(Annotated annotated, BeanManager beanManager) {
+        Set<Annotation> result = new HashSet<>();
+        for (Annotation annotation : annotated.getAnnotations()) {
+            if (beanManager.isQualifier(annotation.annotationType())) {
+                result.add(annotation);
+            }
+        }
+        return result;
+    }
+
+    private static boolean isAnyOrDefault(Annotation qualifier) {
+        return qualifier.annotationType() == Any.class || qualifier.annotationType() == Default.class;
+    }
+}
