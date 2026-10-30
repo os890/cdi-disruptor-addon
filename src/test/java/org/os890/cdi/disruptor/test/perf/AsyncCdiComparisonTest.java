@@ -29,13 +29,14 @@ import java.util.List;
 import java.util.Locale;
 import java.util.concurrent.TimeUnit;
 import java.util.function.Supplier;
+import java.util.regex.Pattern;
 import java.util.stream.Stream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assumptions.assumeTrue;
 
 /**
- * Manual comparison with CDI async events, the plain Disruptor and virtual threads:
+ * Manual comparison with CDI async events, the plain Disruptor, virtual threads and Apache Pekko actors:
  * {@code mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false}
  * (add {@code -Powb} for OpenWebBeans).
  * <p>
@@ -53,6 +54,7 @@ class AsyncCdiComparisonTest {
         new Variant("CDI fireAsync / @ObservesAsync",
             () -> new CdiBenchTarget(CdiAsyncObserver.class, BenchPublisher::cdiAsync)),
         new Variant("virtual thread per event (without CDI)", VirtualThreadBenchTarget::new),
+        new Variant("Apache Pekko actor (without CDI)", PekkoActorBenchTarget::new),
         new Variant("DisruptorEvent, default config",
             () -> new CdiBenchTarget(DisruptorBlockingObserver.class, BenchPublisher::disruptor)),
         new Variant("DisruptorEvent, default config, size 65536",
@@ -76,8 +78,10 @@ class AsyncCdiComparisonTest {
         new Variant("plain Disruptor, Yielding, 65536, preallocated",
             () -> new PlainDisruptorBenchTarget(65536, new YieldingWaitStrategy(), true)));
 
+    // optional filter: -Dbench.variants=<regex>
     static Stream<String> variants() {
-        return VARIANTS.stream().map(Variant::name);
+        Pattern filter = Pattern.compile(System.getProperty("bench.variants", ".*"));
+        return VARIANTS.stream().map(Variant::name).filter(name -> filter.matcher(name).find());
     }
 
     @ParameterizedTest(name = "{0}")

@@ -53,6 +53,7 @@
         <microprofile-config.version>3.1</microprofile-config.version>
         <junit.version>5.11.4</junit.version>
         <smallrye-config.version>3.10.2</smallrye-config.version>
+        <pekko.version>1.1.3</pekko.version>
 
         <checkstyle.version>10.26.1</checkstyle.version>
     </properties>
@@ -87,6 +88,13 @@
             <groupId>io.smallrye.config</groupId>
             <artifactId>smallrye-config-core</artifactId>
             <version>${smallrye-config.version}</version>
+            <scope>test</scope>
+        </dependency>
+        <!-- only for the comparison with an actor-based framework (AsyncCdiComparisonTest) -->
+        <dependency>
+            <groupId>org.apache.pekko</groupId>
+            <artifactId>pekko-actor_2.13</artifactId>
+            <version>${pekko.version}</version>
             <scope>test</scope>
         </dependency>
     </dependencies>
