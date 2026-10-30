@@ -17,7 +17,7 @@
 
 Portable CDI extension (CDI 4 / Jakarta EE 10+) which dispatches events via the
 [LMAX Disruptor](https://github.com/LMAX-Exchange/disruptor) - used like CDI events,
-but asynchronous, allocation-free and with bounded (named) ring-buffers.
+but asynchronous, with allocation-free dispatching and bounded (named) ring-buffers.
 
 ## Usage
 
@@ -114,6 +114,8 @@ flowchart LR
   the observer methods which match the event-type and qualifiers are resolved once per event-type
 * every observer method of a ring-buffer has its own event-handler thread, which skips events it doesn't observe
 * a ring-buffer slot gets reused once all observer methods of the ring-buffer processed it
+* every observer method releases its reference to the event after the notification -
+  processed events don't stay referenced by the ring-buffer and no additional thread is needed for it
 
 Lifecycle of the extension:
 
@@ -140,8 +142,7 @@ sequenceDiagram
 * an observer gets notified if the runtime type of the event is assignable to the observed (raw) type
   and its qualifiers are a subset of the event qualifiers (`@Default` on the observer = only unqualified events)
 * the request-context is only active if requested via `@ObservesDisruptor(requestContext = true)` -
-  activating it per event reduces the throughput by ~10x (measured end-to-end with `YieldingWaitStrategy`:
-  ~5.5M vs. ~60M events/s)
+  activating it per event is expensive (with Weld it's as slow as CDI async events, see [Performance](#performance))
 * `fire` doesn't allocate and doesn't block unless the ring-buffer is full (backpressure) - `tryFire` never blocks
 * every named ring-buffer is a bulkhead: a slow observer can only fill its own ring-buffer
   (but it slows down all observers of the same ring-buffer, once the ring-buffer is full)
@@ -192,6 +193,86 @@ The configuration of every ring-buffer gets resolved once during the bootstrappi
    }
    ```
 
+## Performance
+
+Duration from firing the first event until the observer processed the last one, relative to CDI async events
+(`Event#fireAsync` with `@ObservesAsync` = 100%, lower is faster):
+
+| variant                                                         | ring-buffer size | Weld | OpenWebBeans |
+|-----------------------------------------------------------------|-----------------:|-----:|-------------:|
+| CDI `fireAsync` / `@ObservesAsync`                              |                - | 100% |         100% |
+| virtual thread per event (without CDI)                          |                - | 145% |          79% |
+| `DisruptorEvent`, default config (`BlockingWaitStrategy`)       |             1024 |  51% |          31% |
+| `DisruptorEvent`, default config (`BlockingWaitStrategy`)       |            65536 |  50% |          26% |
+| `DisruptorEvent`, `@ObservesDisruptor(requestContext = true)`   |             1024 |  90% |          24% |
+| `DisruptorEvent`, `YieldingWaitStrategy`                        |             1024 |  17% |           6% |
+| `DisruptorEvent`, `YieldingWaitStrategy`                        |            65536 |  17% |           4% |
+| `DisruptorEvent`, `SleepingWaitStrategy`                        |            65536 |  16% |           3% |
+| `DisruptorEvent`, `LiteBlockingWaitStrategy`                    |            65536 |  17% |           6% |
+| plain Disruptor (without CDI), `BlockingWaitStrategy`           |             1024 |  48% |          28% |
+| plain Disruptor (without CDI), `BlockingWaitStrategy`, preallocated |         1024 |  40% |          22% |
+| plain Disruptor (without CDI), `YieldingWaitStrategy`           |            65536 |  18% |          10% |
+| plain Disruptor (without CDI), `YieldingWaitStrategy`, preallocated |        65536 |  15% |           9% |
+
+* virtual thread per event: the client code dispatches every event directly to the consumer via a new virtual thread
+* plain Disruptor: the Disruptor used directly, without CDI - the slots reference the fired event objects
+  (like this add-on) or the event data gets copied into the preallocated slots (idiomatic zero-allocation usage)
+* the variants without CDI don't depend on the CDI container - their percentages only differ between the columns,
+  because the baseline (CDI async events) differs
+
+The same results as throughput relative to CDI async events (CDI async events = 1, higher is better):
+
+```mermaid
+---
+config:
+  xyChart:
+    width: 760
+    showDataLabel: true
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#4C78A8"
+---
+xychart-beta horizontal
+    title "Weld"
+    x-axis ["CDI async events", "virtual thread per event", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
+    y-axis "throughput (CDI async events = 1)" 0 --> 8
+    bar [1.0, 0.7, 2.0, 2.0, 1.1, 6.0, 5.9, 6.1, 6.1, 2.1, 2.5, 5.5, 6.9]
+```
+
+```mermaid
+---
+config:
+  xyChart:
+    width: 760
+    showDataLabel: true
+  themeVariables:
+    xyChart:
+      plotColorPalette: "#4C78A8"
+---
+xychart-beta horizontal
+    title "OpenWebBeans"
+    x-axis ["CDI async events", "virtual thread per event", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
+    y-axis "throughput (CDI async events = 1)" 0 --> 30
+    bar [1.0, 1.3, 3.2, 3.9, 4.1, 16.7, 27.0, 29.2, 16.1, 3.6, 4.6, 10.4, 11.5]
+```
+
+**This isn't a representative measurement - it's just an orientation of what to expect.**
+The numbers depend on the hardware, JVM, CDI container, the observer and the configuration.
+Measured with 2M events, one producer thread and one observer - every variant in its own JVM
+(median of 5 rounds after 2 warmup rounds, median of 4-5 JVM runs) with Weld 5.1 and OpenWebBeans 4.0.
+The results of the fastest variants vary considerably between the runs.
+A larger ring-buffer only helps if the observer can keep up with the producer (it absorbs bursts,
+so the producer doesn't have to wait for free slots) - it doesn't speed up a slow observer,
+but it costs memory (the slots are preallocated) and allows more pending events.
+CDI async events use an unbounded queue and a thread-pool (no ordering), whereas every observer method of a
+ring-buffer has its own thread and receives the events in order.
+Busy-spin, yielding and sleeping wait-strategies keep the observer threads busy while waiting for events
+(measured without events: ~100% of a core per observer method with `YieldingWaitStrategy`, ~40% with
+`SleepingWaitStrategy`, ~0% with the default `BlockingWaitStrategy`) - use them only for ring-buffers which need it.
+
+Run it via `mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false`
+(add `-Powb` for OpenWebBeans).
+
 ## Restrictions
 
 * `DisruptorEvent` is supported for injection points processed by the container (fields, constructors,
@@ -209,7 +290,8 @@ The configuration of every ring-buffer gets resolved once during the bootstrappi
 ```
 mvn verify          # tests with Weld (with and without MicroProfile Config)
 mvn verify -Powb    # tests with OpenWebBeans (with and without MicroProfile Config)
-mvn test -Dtest=ThroughputTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false   # manual throughput check
+mvn test -Dtest=ThroughputTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false           # manual throughput check
+mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false   # comparison with CDI async events
 ```
 
 Apache RAT (license headers) and Checkstyle (`src/build/checkstyle.xml`) run in the `validate` phase.

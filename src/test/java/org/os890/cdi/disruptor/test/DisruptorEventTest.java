@@ -32,6 +32,7 @@ import org.os890.cdi.disruptor.test.beans.SlowTask;
 import org.os890.cdi.disruptor.test.beans.SlowTaskObserver;
 import org.os890.cdi.disruptor.test.beans.TextObserver;
 
+import java.lang.ref.WeakReference;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Queue;
@@ -39,6 +40,7 @@ import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 
@@ -108,6 +110,21 @@ class DisruptorEventTest {
     }
 
     @Test
+    void processedEventsDontStayReferencedByTheRingBuffer() throws InterruptedException {
+        // observed by two observer methods (OrderObserver and PremiumOrderObserver)
+        WeakReference<Order> processedOrder = firePremiumOrder("collectable");
+        recorder.await(OrderObserver.ORDERS, 1);
+        recorder.await(PremiumOrderObserver.PREMIUM_ORDERS, 1);
+
+        long timeout = System.currentTimeMillis() + 10_000;
+        while (processedOrder.get() != null && System.currentTimeMillis() < timeout) {
+            System.gc();
+            Thread.sleep(10);
+        }
+        assertNull(processedOrder.get(), "the processed event is still referenced");
+    }
+
+    @Test
     void observerOfSuperTypeReceivesSubTypes() throws InterruptedException {
         publisher.anyEvent().fire("hello");
         publisher.anyEvent().fire(new StringBuilder("world"));
@@ -152,6 +169,13 @@ class DisruptorEventTest {
             () -> publisher.premiumOrderEvent().select(Premium.Literal.INSTANCE));
     }
 
+
+    // separate method - the caller mustn't keep a reference to the event
+    private WeakReference<Order> firePremiumOrder(String id) {
+        Order order = new Order(id);
+        publisher.premiumOrderEvent().fire(order);
+        return new WeakReference<>(order);
+    }
 
     private static SeContainer newContainer() {
         // bean discovery stays enabled - Weld doesn't load portable extensions otherwise

@@ -27,7 +27,6 @@ import org.os890.cdi.disruptor.RingBufferSettings;
 
 import java.lang.annotation.Annotation;
 import java.time.Duration;
-import java.util.BitSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -35,21 +34,26 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import java.util.logging.Level;
 import java.util.logging.Logger;
+import java.util.stream.IntStream;
 
 /**
  * Publishes events to a ring-buffer and notifies the observer methods of the ring-buffer.
  * <p>
- * Every observer method has its own {@link EventHandler}, which skips events it doesn't observe.
+ * Every observer method has its own {@link EventHandler} (thread) and its own entry in every slot of the
+ * ring-buffer: an event gets stored in the entries of the observer methods which observe it and every observer
+ * method clears its entry after the notification - therefore processed events don't stay referenced by the
+ * ring-buffer and no additional event-handler is needed for clearing slots.
  * The observer methods which observe an event get resolved once per event-type and qualifiers
  * (see {@link Publisher}).
  */
 final class DisruptorDispatcher {
     private static final Logger LOG = Logger.getLogger(DisruptorDispatcher.class.getName());
 
-    private static final EventTranslatorTwoArg<EventSlot, Object, BitSet> EVENT_TRANSLATOR =
+    private static final EventTranslatorTwoArg<EventSlot, Object, int[]> EVENT_TRANSLATOR =
         (slot, sequence, payload, recipients) -> {
-            slot.payload = payload;
-            slot.recipients = recipients;
+            for (int recipient : recipients) {
+                slot.payloads[recipient] = payload;
+            }
         };
 
     private final BeanManager beanManager;
@@ -71,16 +75,16 @@ final class DisruptorDispatcher {
 
     synchronized void start() {
         if (!observerMethods.isEmpty()) {
-            disruptor = new Disruptor<>(EventSlot::new, settings.ringBufferSize(), settings.threadFactory(),
-                    settings.producerType(), settings.waitStrategy());
+            int observerCount = observerMethods.size();
+            disruptor = new Disruptor<>(() -> new EventSlot(observerCount), settings.ringBufferSize(),
+                    settings.threadFactory(), settings.producerType(), settings.waitStrategy());
             disruptor.setDefaultExceptionHandler(new LoggingExceptionHandler());
 
             ObserverEventHandler[] eventHandlers = new ObserverEventHandler[observerMethods.size()];
             for (int i = 0; i < eventHandlers.length; i++) {
                 eventHandlers[i] = new ObserverEventHandler(i, observerMethods.get(i));
             }
-            // the last handler releases the references to the payload once all observers are done
-            disruptor.handleEventsWith(eventHandlers).then((slot, sequence, endOfBatch) -> slot.clear());
+            disruptor.handleEventsWith(eventHandlers);
             ringBuffer = disruptor.start();
         }
         running = true;
@@ -122,7 +126,8 @@ final class DisruptorDispatcher {
      */
     final class Publisher {
         private final Set<Annotation> qualifiers;
-        private final Map<Class<?>, BitSet> recipientsByEventType = new ConcurrentHashMap<>();
+        // indexes of the observer methods which observe events of a type
+        private final Map<Class<?>, int[]> recipientsByEventType = new ConcurrentHashMap<>();
 
         private Publisher(Set<Annotation> qualifiers) {
             this.qualifiers = qualifiers;
@@ -137,11 +142,11 @@ final class DisruptorDispatcher {
             }
 
             Class<?> eventType = event.getClass();
-            BitSet recipients = recipientsByEventType.get(eventType);
+            int[] recipients = recipientsByEventType.get(eventType);
             if (recipients == null) {
                 recipients = recipientsByEventType.computeIfAbsent(eventType, this::resolveRecipients);
             }
-            if (recipients.isEmpty()) {
+            if (recipients.length == 0) {
                 return true;
             }
             if (waitForCapacity) {
@@ -151,27 +156,26 @@ final class DisruptorDispatcher {
             return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
         }
 
-        private BitSet resolveRecipients(Class<?> eventType) {
-            BitSet result = new BitSet(observerMethods.size());
-            for (int i = 0; i < observerMethods.size(); i++) {
-                if (observerMethods.get(i).observes(eventType, qualifiers)) {
-                    result.set(i);
-                }
-            }
-            return result;
+        private int[] resolveRecipients(Class<?> eventType) {
+            return IntStream.range(0, observerMethods.size())
+                .filter(index -> observerMethods.get(index).observes(eventType, qualifiers))
+                .toArray();
         }
     }
 
     /**
-     * Entry of the ring-buffer.
+     * Entry of the ring-buffer with one payload-reference per observer method -
+     * null if the observer method doesn't observe the event or already processed it.
+     * <p>
+     * No additional synchronization is needed: the payloads get stored before the sequence gets published and
+     * an observer method clears its reference before its event-handler advances its sequence, which is required
+     * before the slot can be reused.
      */
     static final class EventSlot {
-        private Object payload;
-        private BitSet recipients;
+        private final Object[] payloads;
 
-        void clear() {
-            payload = null;
-            recipients = null;
+        EventSlot(int observerCount) {
+            this.payloads = new Object[observerCount];
         }
     }
 
@@ -189,21 +193,31 @@ final class DisruptorDispatcher {
 
         @Override
         public void onEvent(EventSlot slot, long sequence, boolean endOfBatch) {
-            if (!slot.recipients.get(index)) {
+            Object payload = slot.payloads[index];
+            if (payload == null) {
                 return;
             }
 
-            if (!observerMethod.isRequestContextRequired()) {
-                notifyObserverMethod(slot, sequence);
-                return;
+            try {
+                if (observerMethod.isRequestContextRequired()) {
+                    notifyWithRequestContext(payload, sequence);
+                } else {
+                    notifyObserverMethod(payload, sequence);
+                }
+            } finally {
+                // releases the reference of this observer method - the event can be collected once all observer
+                // methods processed it
+                slot.payloads[index] = null;
             }
+        }
 
+        private void notifyWithRequestContext(Object payload, long sequence) {
             if (requestContextController == null) {
                 requestContextController = beanManager.createInstance().select(RequestContextController.class).get();
             }
             boolean activated = requestContextController.activate();
             try {
-                notifyObserverMethod(slot, sequence);
+                notifyObserverMethod(payload, sequence);
             } finally {
                 if (activated) {
                     requestContextController.deactivate();
@@ -211,12 +225,12 @@ final class DisruptorDispatcher {
             }
         }
 
-        private void notifyObserverMethod(EventSlot slot, long sequence) {
+        private void notifyObserverMethod(Object payload, long sequence) {
             try {
-                observerMethod.notify(slot.payload);
+                observerMethod.notify(payload);
             } catch (Exception e) {
                 LOG.log(Level.SEVERE, "observer method " + observerMethod + " failed to process event "
-                        + slot.payload + " (sequence " + sequence + ")", e);
+                        + payload + " (sequence " + sequence + ")", e);
             }
         }
     }
