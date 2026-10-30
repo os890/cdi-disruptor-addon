@@ -19,14 +19,22 @@ import jakarta.enterprise.context.ApplicationScoped;
 import org.os890.cdi.disruptor.DisruptorConfig;
 import org.os890.cdi.disruptor.RingBufferSettings;
 
+import java.time.Duration;
+
 @ApplicationScoped
 public class TestDisruptorConfig implements DisruptorConfig {
     public static final int CUSTOM_SIZE = 16;
+    // circuit-breaker settings of the ring-buffers "guarded" and "flaky"
+    public static final int GUARDED_FAILURE_THRESHOLD = 2;
+    public static final Duration GUARDED_DELAY = Duration.ofMillis(300);
 
     @Override
     public void configure(RingBufferSettings settings) {
         if ("custom".equals(settings.name())) {
             settings.ringBufferSize(CUSTOM_SIZE);
+        }
+        if ("guarded".equals(settings.name()) || "flaky".equals(settings.name())) {
+            settings.circuitBreakerFailureThreshold(GUARDED_FAILURE_THRESHOLD).circuitBreakerDelay(GUARDED_DELAY);
         }
     }
 }

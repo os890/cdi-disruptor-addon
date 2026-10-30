@@ -25,6 +25,7 @@ import jakarta.enterprise.inject.spi.Bean;
 import jakarta.enterprise.inject.spi.BeanManager;
 import jakarta.enterprise.inject.spi.DefinitionException;
 import jakarta.enterprise.inject.spi.InjectionPoint;
+import org.os890.cdi.disruptor.CircuitBreaker;
 import org.os890.cdi.disruptor.DisruptorEvent;
 import org.os890.cdi.disruptor.ObservesDisruptor;
 import org.os890.cdi.disruptor.RingBuffer;
@@ -60,6 +61,7 @@ final class DisruptorObserverMethod {
     private final int eventParameterPosition;
     private final String ringBufferName;
     private final boolean requestContextRequired;
+    private final boolean circuitBreakerEnabled;
     private final Class<?> observedType;
     private final Set<Annotation> observedQualifiers;
     private final InjectionPoint[] injectionPoints;
@@ -96,7 +98,8 @@ final class DisruptorObserverMethod {
                 // injection points of observer methods aren't processed by the container - see ProcessInjectionPoint
                 Set<Annotation> qualifiers = Qualifiers.qualifiersOf(parameter, beanManager);
                 disruptorEventArguments[position] = new DisruptorEventImpl<>(extension,
-                        Qualifiers.ringBufferName(qualifiers), Qualifiers.normalizeEventQualifiers(qualifiers));
+                        Qualifiers.ringBufferName(qualifiers), Qualifiers.normalizeEventQualifiers(qualifiers),
+                        parameter.isAnnotationPresent(CircuitBreaker.class));
             } else {
                 // BeanManager#createInjectionPoint isn't used, because some containers (e.g. OWB) would fire
                 // ProcessInjectionPoint after the deployment
@@ -116,6 +119,7 @@ final class DisruptorObserverMethod {
         AnnotatedParameter<?> eventParameter = parameters.get(eventPosition);
         this.observedType = boxed(rawType(eventParameter.getBaseType()));
         this.requestContextRequired = eventParameter.getAnnotation(ObservesDisruptor.class).requestContext();
+        this.circuitBreakerEnabled = annotatedMethod.isAnnotationPresent(CircuitBreaker.class);
         Set<Annotation> eventParameterQualifiers = Qualifiers.qualifiersOf(eventParameter, beanManager);
         this.ringBufferName = Qualifiers.ringBufferName(eventParameterQualifiers);
         // @RingBuffer selects the ring-buffer and isn't used for matching events
@@ -151,6 +155,11 @@ final class DisruptorObserverMethod {
                     + " has to be a class or a parameterized type, but it is "
                     + eventParameters.get(0).getBaseType().getTypeName());
         }
+        if (eventParameters.get(0).isAnnotationPresent(CircuitBreaker.class)) {
+            throw new DefinitionException("@" + CircuitBreaker.class.getSimpleName() + " isn't supported for the"
+                    + " event parameter of " + methodName + " - annotate the observer method (failing observer)"
+                    + " or " + DisruptorEvent.class.getSimpleName() + " injection points (producer)");
+        }
         if (Modifier.isPrivate(javaMethod.getModifiers()) && !Modifier.isStatic(javaMethod.getModifiers())
                 && beanManager.isNormalScope(bean.getScope())) {
             throw new DefinitionException(methodName + " is private, which isn't supported for observer methods"
@@ -164,6 +173,10 @@ final class DisruptorObserverMethod {
 
     boolean isRequestContextRequired() {
         return requestContextRequired;
+    }
+
+    boolean isCircuitBreakerEnabled() {
+        return circuitBreakerEnabled;
     }
 
     boolean observes(Class<?> eventType, Set<Annotation> eventQualifiers) {

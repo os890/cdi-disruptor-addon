@@ -35,6 +35,9 @@ public final class RingBufferSettings {
     private ProducerType producerType = ProducerType.MULTI;
     private Duration shutdownTimeout = Duration.ofSeconds(10);
     private ThreadFactory threadFactory;
+    private int circuitBreakerFailureThreshold = 5;
+    private Duration circuitBreakerDelay = Duration.ofSeconds(10);
+    private Duration circuitBreakerMaxWait = Duration.ZERO;
 
     /**
      * @param name name of the ring-buffer
@@ -139,11 +142,73 @@ public final class RingBufferSettings {
         return this;
     }
 
+    /**
+     * @return number of consecutive rejected events which open the {@link CircuitBreaker} (default: 5)
+     */
+    public int circuitBreakerFailureThreshold() {
+        return circuitBreakerFailureThreshold;
+    }
+
+    /**
+     * @param failureThreshold number of consecutive rejected events which open the {@link CircuitBreaker}
+     * @return this instance
+     */
+    public RingBufferSettings circuitBreakerFailureThreshold(int failureThreshold) {
+        if (failureThreshold < 1) {
+            throw new IllegalArgumentException("the failure-threshold of the circuit-breaker has to be positive");
+        }
+        this.circuitBreakerFailureThreshold = failureThreshold;
+        return this;
+    }
+
+    /**
+     * @return time the {@link CircuitBreaker} stays open before an event gets published as trial (default: 10s)
+     */
+    public Duration circuitBreakerDelay() {
+        return circuitBreakerDelay;
+    }
+
+    /**
+     * @param delay time the {@link CircuitBreaker} stays open before an event gets published as trial
+     * @return this instance
+     */
+    public RingBufferSettings circuitBreakerDelay(Duration delay) {
+        this.circuitBreakerDelay = requireNonNegative(delay, "delay");
+        return this;
+    }
+
+    /**
+     * @return max. time to wait for a free slot, before an event of a {@link CircuitBreaker} injection point
+     *         gets rejected (default: 0 - no waiting)
+     */
+    public Duration circuitBreakerMaxWait() {
+        return circuitBreakerMaxWait;
+    }
+
+    /**
+     * @param maxWait max. time to wait for a free slot, before an event of a {@link CircuitBreaker} injection
+     *                point gets rejected
+     * @return this instance
+     */
+    public RingBufferSettings circuitBreakerMaxWait(Duration maxWait) {
+        this.circuitBreakerMaxWait = requireNonNegative(maxWait, "maxWait");
+        return this;
+    }
+
     @Override
     public String toString() {
         return "RingBufferSettings[name=" + name + ", size=" + ringBufferSize
             + ", waitStrategy=" + waitStrategy.getClass().getSimpleName() + ", producerType=" + producerType
-            + ", shutdownTimeout=" + shutdownTimeout + "]";
+            + ", shutdownTimeout=" + shutdownTimeout + ", circuitBreakerFailureThreshold="
+            + circuitBreakerFailureThreshold + ", circuitBreakerDelay=" + circuitBreakerDelay
+            + ", circuitBreakerMaxWait=" + circuitBreakerMaxWait + "]";
+    }
+
+    private static Duration requireNonNegative(Duration duration, String name) {
+        if (Objects.requireNonNull(duration, name).isNegative()) {
+            throw new IllegalArgumentException(name + " must not be negative");
+        }
+        return duration;
     }
 
     private static ThreadFactory daemonThreadFactory(String ringBufferName) {

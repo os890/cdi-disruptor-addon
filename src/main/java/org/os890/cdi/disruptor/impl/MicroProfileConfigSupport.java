@@ -78,6 +78,14 @@ final class MicroProfileConfigSupport {
             config.getOptionalValue(prefix + "shutdown-timeout-ms", Long.class)
                 .map(Duration::ofMillis)
                 .ifPresent(settings::shutdownTimeout);
+            config.getOptionalValue(prefix + "circuit-breaker.failure-threshold", Integer.class)
+                .ifPresent(settings::circuitBreakerFailureThreshold);
+            config.getOptionalValue(prefix + "circuit-breaker.delay-ms", Long.class)
+                .map(Duration::ofMillis)
+                .ifPresent(settings::circuitBreakerDelay);
+            config.getOptionalValue(prefix + "circuit-breaker.max-wait-ms", Long.class)
+                .map(Duration::ofMillis)
+                .ifPresent(settings::circuitBreakerMaxWait);
         }
     }
 }

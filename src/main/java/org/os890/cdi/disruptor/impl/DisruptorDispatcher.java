@@ -32,6 +32,7 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
 import java.util.logging.Level;
 import java.util.logging.Logger;
 import java.util.stream.IntStream;
@@ -48,6 +49,8 @@ import java.util.stream.IntStream;
  */
 final class DisruptorDispatcher {
     private static final Logger LOG = Logger.getLogger(DisruptorDispatcher.class.getName());
+    // pause between attempts to publish an event with a max. wait-time
+    private static final long PUBLISH_RETRY_NANOS = 10_000;
 
     private static final EventTranslatorTwoArg<EventSlot, Object, int[]> EVENT_TRANSLATOR =
         (slot, sequence, payload, recipients) -> {
@@ -60,6 +63,7 @@ final class DisruptorDispatcher {
     private final List<DisruptorObserverMethod> observerMethods;
     private final RingBufferSettings settings;
     private final Map<Set<Annotation>, Publisher> publishers = new ConcurrentHashMap<>();
+    private final CircuitBreakerState circuitBreaker;
 
     private Disruptor<EventSlot> disruptor;
     private volatile RingBuffer<EventSlot> ringBuffer;
@@ -71,6 +75,7 @@ final class DisruptorDispatcher {
         this.beanManager = beanManager;
         this.observerMethods = List.copyOf(observerMethods);
         this.settings = settings;
+        this.circuitBreaker = new CircuitBreakerState(settings);
     }
 
     synchronized void start() {
@@ -82,7 +87,9 @@ final class DisruptorDispatcher {
 
             ObserverEventHandler[] eventHandlers = new ObserverEventHandler[observerMethods.size()];
             for (int i = 0; i < eventHandlers.length; i++) {
-                eventHandlers[i] = new ObserverEventHandler(i, observerMethods.get(i));
+                DisruptorObserverMethod observerMethod = observerMethods.get(i);
+                eventHandlers[i] = new ObserverEventHandler(i, observerMethod, observerMethod.isCircuitBreakerEnabled()
+                        ? new ObserverCircuitBreaker(observerMethod.toString(), settings) : null);
             }
             disruptor.handleEventsWith(eventHandlers);
             ringBuffer = disruptor.start();
@@ -122,6 +129,14 @@ final class DisruptorDispatcher {
     }
 
     /**
+     * @return the circuit-breaker of this ring-buffer (only used by injection points with
+     *         {@link org.os890.cdi.disruptor.CircuitBreaker})
+     */
+    CircuitBreakerState circuitBreaker() {
+        return circuitBreaker;
+    }
+
+    /**
      * Hot path of firing events - resolves the observers once per event-type and avoids allocations.
      */
     final class Publisher {
@@ -133,7 +148,44 @@ final class DisruptorDispatcher {
             this.qualifiers = qualifiers;
         }
 
+        /**
+         * @param event           the event
+         * @param waitForCapacity true to wait until there is a free slot
+         * @return true if the event was published (or if there is no observer for it)
+         */
         boolean publish(Object event, boolean waitForCapacity) {
+            int[] recipients = recipientsOf(event);
+            if (recipients.length == 0) {
+                return true;
+            }
+            if (waitForCapacity) {
+                ringBuffer.publishEvent(EVENT_TRANSLATOR, event, recipients);
+                return true;
+            }
+            return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
+        }
+
+        /**
+         * @param event        the event
+         * @param maxWaitNanos max. time to wait for a free slot
+         * @return true if the event was published within the given time (or if there is no observer for it)
+         */
+        boolean publish(Object event, long maxWaitNanos) {
+            int[] recipients = recipientsOf(event);
+            if (recipients.length == 0 || ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients)) {
+                return true;
+            }
+            long deadline = System.nanoTime() + maxWaitNanos;
+            while (System.nanoTime() - deadline < 0) {
+                LockSupport.parkNanos(PUBLISH_RETRY_NANOS);
+                if (ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private int[] recipientsOf(Object event) {
             if (event == null) {
                 throw new IllegalArgumentException("the event must not be null");
             }
@@ -146,14 +198,7 @@ final class DisruptorDispatcher {
             if (recipients == null) {
                 recipients = recipientsByEventType.computeIfAbsent(eventType, this::resolveRecipients);
             }
-            if (recipients.length == 0) {
-                return true;
-            }
-            if (waitForCapacity) {
-                ringBuffer.publishEvent(EVENT_TRANSLATOR, event, recipients);
-                return true;
-            }
-            return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
+            return recipients;
         }
 
         private int[] resolveRecipients(Class<?> eventType) {
@@ -182,13 +227,16 @@ final class DisruptorDispatcher {
     private final class ObserverEventHandler implements EventHandler<EventSlot> {
         private final int index;
         private final DisruptorObserverMethod observerMethod;
+        // null if the observer method doesn't use a circuit-breaker
+        private final ObserverCircuitBreaker circuitBreaker;
 
         // only used by the thread of this handler (and only for observer methods which require it)
         private RequestContextController requestContextController;
 
-        ObserverEventHandler(int index, DisruptorObserverMethod observerMethod) {
+        ObserverEventHandler(int index, DisruptorObserverMethod observerMethod, ObserverCircuitBreaker circuitBreaker) {
             this.index = index;
             this.observerMethod = observerMethod;
+            this.circuitBreaker = circuitBreaker;
         }
 
         @Override
@@ -199,6 +247,9 @@ final class DisruptorDispatcher {
             }
 
             try {
+                if (circuitBreaker != null && !circuitBreaker.allowsNotification()) {
+                    return;
+                }
                 if (observerMethod.isRequestContextRequired()) {
                     notifyWithRequestContext(payload, sequence);
                 } else {
@@ -231,6 +282,13 @@ final class DisruptorDispatcher {
             } catch (Exception e) {
                 LOG.log(Level.SEVERE, "observer method " + observerMethod + " failed to process event "
                         + payload + " (sequence " + sequence + ")", e);
+                if (circuitBreaker != null) {
+                    circuitBreaker.onFailure();
+                }
+                return;
+            }
+            if (circuitBreaker != null) {
+                circuitBreaker.onSuccess();
             }
         }
     }

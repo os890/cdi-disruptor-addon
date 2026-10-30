@@ -143,7 +143,8 @@ sequenceDiagram
   and its qualifiers are a subset of the event qualifiers (`@Default` on the observer = only unqualified events)
 * the request-context is only active if requested via `@ObservesDisruptor(requestContext = true)` -
   activating it per event is expensive (with Weld it's as slow as CDI async events, see [Performance](#performance))
-* `fire` doesn't allocate and doesn't block unless the ring-buffer is full (backpressure) - `tryFire` never blocks
+* `fire` doesn't allocate and doesn't block unless the ring-buffer is full (backpressure) - `tryFire` never blocks,
+  with [`@CircuitBreaker`](#circuit-breaker) `fire` rejects events instead of blocking
 * every named ring-buffer is a bulkhead: a slow observer can only fill its own ring-buffer
   (but it slows down all observers of the same ring-buffer, once the ring-buffer is full)
 * observers of `@Dependent` beans get a new instance per event, which gets destroyed afterwards
@@ -170,7 +171,8 @@ void onAuditEntry(@ObservesDisruptor @RingBuffer(name = "audit") AuditEntry entr
 The configuration of every ring-buffer gets resolved once during the bootstrapping
 (later entries override former ones):
 
-1. defaults: size 1024, `BlockingWaitStrategy`, `ProducerType.MULTI`, 10s shutdown-timeout, daemon threads
+1. defaults: size 1024, `BlockingWaitStrategy`, `ProducerType.MULTI`, 10s shutdown-timeout, daemon threads,
+   circuit-breaker: failure-threshold 5, delay 10s, max. wait-time 0
 2. `@Nonbinding` attributes of `@RingBuffer` (`size`, `waitStrategy`) -
    all usages with the same name have to specify the same values (or none)
 3. MicroProfile Config (optional, used if available):
@@ -179,6 +181,9 @@ The configuration of every ring-buffer gets resolved once during the bootstrappi
    cdi.disruptor.audit.wait-strategy=BusySpinWaitStrategy
    cdi.disruptor.audit.producer-type=SINGLE
    cdi.disruptor.audit.shutdown-timeout-ms=5000
+   cdi.disruptor.audit.circuit-breaker.failure-threshold=10
+   cdi.disruptor.audit.circuit-breaker.delay-ms=30000
+   cdi.disruptor.audit.circuit-breaker.max-wait-ms=5
    ```
 4. beans implementing `DisruptorConfig` (e.g. for custom thread-factories or wait-strategies with parameters):
    ```java
@@ -192,6 +197,52 @@ The configuration of every ring-buffer gets resolved once during the bootstrappi
        }
    }
    ```
+
+## Circuit-breaker
+
+`@CircuitBreaker` is a marker annotation for two use-cases - its settings are part of the configuration of the
+ring-buffer (failure-threshold, delay and max. wait-time - see above):
+
+**Protect the producer** (`DisruptorEvent` injection points):
+the disruptor protects the observers from overload, because they process the events of a bounded ring-buffer at
+their own pace - if they can't keep up, the ring-buffer gets full and `fire` waits for free slots (backpressure).
+With `@CircuitBreaker` the producer doesn't get blocked:
+
+```java
+@Inject
+@CircuitBreaker
+private DisruptorEvent<OrderPlaced> orderPlacedEvent;
+
+try {
+    orderPlacedEvent.fire(order);
+} catch (EventRejectedException e) {
+    // the ring-buffer is full (no free slot within the max. wait-time) or the circuit-breaker is open
+}
+```
+
+* closed: an event gets rejected, if there is no free slot within the max. wait-time
+  (`fire` throws an `EventRejectedException`, `tryFire` returns false)
+* open: after the failure-threshold of consecutive rejections, all events get rejected immediately for the delay -
+  the observers get time to process the pending events
+* half-open: after the delay one event gets published as trial - the circuit-breaker gets closed, if it was accepted
+* there is one circuit-breaker per ring-buffer for all its injection points with `@CircuitBreaker` -
+  injection points without it aren't affected
+
+**Protect against failing observers** (observer methods):
+
+```java
+@CircuitBreaker
+void onOrderPlaced(@ObservesDisruptor OrderPlaced event, RemoteService remoteService) {
+    remoteService.send(event); // might fail
+}
+```
+
+* closed: the observer method gets notified
+* open: after the failure-threshold of consecutive exceptions, the observer method doesn't get notified
+  for the delay (the events get skipped, counted and logged)
+* half-open: after the delay the next event gets passed to the observer method as trial -
+  the circuit-breaker gets closed, if it doesn't fail
+* every observer method has its own circuit-breaker - other observer methods aren't affected
 
 ## Performance
 
@@ -283,6 +334,7 @@ Run it via `mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIf
   initializers, producers) and as additional parameter of `@ObservesDisruptor` methods -
   not via programmatic lookup (`Instance<DisruptorEvent<...>>`)
 * `fire` within an observer method can dead-lock if the ring-buffer is full - use `tryFire` there
+  or `@CircuitBreaker` at the `DisruptorEvent` parameter
 * ring-buffers are created during the bootstrapping - selecting a ring-buffer at runtime
   (`select(RingBuffer.Literal.of("x"))`) only reaches observers if the name is used by an observer,
   the configuration attributes of `@RingBuffer` are only evaluated at injection points and observer methods

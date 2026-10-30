@@ -20,6 +20,9 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.params.ParameterizedTest;
 import org.junit.jupiter.params.provider.ValueSource;
+import org.os890.cdi.disruptor.test.invalid.CircuitBreakerOnEventParameter;
+import org.os890.cdi.disruptor.test.invalid.CircuitBreakerOnOtherMethod;
+import org.os890.cdi.disruptor.test.invalid.CircuitBreakerOnOtherInjectionPoint;
 import org.os890.cdi.disruptor.test.invalid.ConflictingRingBufferConfig;
 import org.os890.cdi.disruptor.test.invalid.InvalidRingBufferSize;
 import org.os890.cdi.disruptor.test.invalid.PrivateObserver;
@@ -86,7 +89,9 @@ class InvalidDefinitionTest {
     @ValueSource(classes = {
         TwoEventParametersObserver.class, PrivateObserver.class,
         UnsatisfiedParameterObserver.class, WildcardInjectionPoint.class,
-        ConflictingRingBufferConfig.class, InvalidRingBufferSize.class
+        ConflictingRingBufferConfig.class, InvalidRingBufferSize.class,
+        CircuitBreakerOnOtherInjectionPoint.class, CircuitBreakerOnEventParameter.class,
+        CircuitBreakerOnOtherMethod.class
     })
     void invalidDefinitionFailsTheDeployment(Class<?> invalidBean) {
         RuntimeException exception = assertThrows(RuntimeException.class,

@@ -33,6 +33,7 @@ import jakarta.enterprise.inject.spi.Extension;
 import jakarta.enterprise.inject.spi.InjectionPoint;
 import jakarta.enterprise.inject.spi.ProcessInjectionPoint;
 import jakarta.enterprise.inject.spi.ProcessManagedBean;
+import org.os890.cdi.disruptor.CircuitBreaker;
 import org.os890.cdi.disruptor.DisruptorConfig;
 import org.os890.cdi.disruptor.DisruptorEvent;
 import org.os890.cdi.disruptor.ObservesDisruptor;
@@ -82,7 +83,14 @@ public class DisruptorExtension implements Extension {
     synchronized void collectDisruptorEventInjectionPoints(@Observes ProcessInjectionPoint<?, ?> event) {
         InjectionPoint injectionPoint = event.getInjectionPoint();
         Type type = injectionPoint.getType();
+        boolean circuitBreaker = injectionPoint.getAnnotated() != null
+                && injectionPoint.getAnnotated().isAnnotationPresent(CircuitBreaker.class);
         if (!isDisruptorEventType(type)) {
+            if (circuitBreaker) {
+                event.addDefinitionError(new DefinitionException("@" + CircuitBreaker.class.getSimpleName()
+                        + " is only supported for " + DisruptorEvent.class.getSimpleName()
+                        + " injection points - see " + describe(injectionPoint)));
+            }
             return;
         }
         if (!(type instanceof ParameterizedType parameterizedType)
@@ -102,7 +110,7 @@ public class DisruptorExtension implements Extension {
         }
 
         Channel channel = new Channel(Qualifiers.ringBufferName(qualifiers),
-                Qualifiers.normalizeEventQualifiers(qualifiers));
+                Qualifiers.normalizeEventQualifiers(qualifiers), circuitBreaker);
         int channelId = channelIds.computeIfAbsent(channel, newChannel -> {
             channels.add(newChannel);
             channelTypes.add(new HashSet<>());
@@ -120,6 +128,12 @@ public class DisruptorExtension implements Extension {
             boolean observerMethod = method.getParameters().stream()
                     .anyMatch(parameter -> parameter.isAnnotationPresent(ObservesDisruptor.class));
             if (!observerMethod) {
+                if (method.isAnnotationPresent(CircuitBreaker.class)) {
+                    event.addDefinitionError(new DefinitionException("@" + CircuitBreaker.class.getSimpleName()
+                            + " is only supported for observer methods with a parameter annotated with @"
+                            + ObservesDisruptor.class.getSimpleName() + " - see "
+                            + describe(method.getJavaMember())));
+                }
                 continue;
             }
 
@@ -152,7 +166,8 @@ public class DisruptorExtension implements Extension {
                     .qualifiers(new DisruptorEventChannel.Literal(channelId))
                     .scope(Dependent.class)
                     .createWith(creationalContext ->
-                        new DisruptorEventImpl<>(this, channel.ringBufferName(), channel.qualifiers()));
+                        new DisruptorEventImpl<>(this, channel.ringBufferName(), channel.qualifiers(),
+                                channel.circuitBreaker()));
         }
     }
 
@@ -299,6 +314,6 @@ public class DisruptorExtension implements Extension {
     private record ObserverDefinition(Bean<?> bean, AnnotatedMethod<?> method) {
     }
 
-    private record Channel(String ringBufferName, Set<Annotation> qualifiers) {
+    private record Channel(String ringBufferName, Set<Annotation> qualifiers, boolean circuitBreaker) {
     }
 }

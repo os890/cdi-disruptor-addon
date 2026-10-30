@@ -17,6 +17,7 @@ package org.os890.cdi.disruptor.impl;
 
 import jakarta.enterprise.inject.spi.CDI;
 import org.os890.cdi.disruptor.DisruptorEvent;
+import org.os890.cdi.disruptor.EventRejectedException;
 import org.os890.cdi.disruptor.RingBuffer;
 
 import java.io.IOException;
@@ -36,26 +37,42 @@ final class DisruptorEventImpl<T> implements DisruptorEvent<T>, Serializable {
 
     private final String ringBufferName;
     private final Set<Annotation> qualifiers;
+    private final boolean circuitBreakerEnabled;
 
     private transient DisruptorExtension extension;
 
     // racy single-check idiom: the publisher is thread-safe and its fields are final
     private transient DisruptorDispatcher.Publisher publisher;
+    private transient CircuitBreakerState circuitBreaker;
 
-    DisruptorEventImpl(DisruptorExtension extension, String ringBufferName, Set<Annotation> qualifiers) {
+    DisruptorEventImpl(DisruptorExtension extension,
+                       String ringBufferName,
+                       Set<Annotation> qualifiers,
+                       boolean circuitBreakerEnabled) {
         this.extension = extension;
         this.ringBufferName = ringBufferName;
         this.qualifiers = qualifiers;
+        this.circuitBreakerEnabled = circuitBreakerEnabled;
     }
 
     @Override
     public void fire(T event) {
-        publisher().publish(event, true);
+        if (!circuitBreakerEnabled) {
+            publisher().publish(event, true);
+            return;
+        }
+        CircuitBreakerState currentCircuitBreaker = circuitBreaker();
+        if (!currentCircuitBreaker.publish(publisher(), event)) {
+            throw new EventRejectedException(ringBufferName, currentCircuitBreaker.isOpen());
+        }
     }
 
     @Override
     public boolean tryFire(T event) {
-        return publisher().publish(event, false);
+        if (!circuitBreakerEnabled) {
+            return publisher().publish(event, false);
+        }
+        return circuitBreaker().publish(publisher(), event);
     }
 
     @Override
@@ -70,7 +87,8 @@ final class DisruptorEventImpl<T> implements DisruptorEvent<T>, Serializable {
 
     @Override
     public String toString() {
-        return "DisruptorEvent[ringBuffer=" + ringBufferName + ", qualifiers=" + qualifiers + "]";
+        return "DisruptorEvent[ringBuffer=" + ringBufferName + ", qualifiers=" + qualifiers
+            + ", circuitBreaker=" + circuitBreakerEnabled + "]";
     }
 
     private DisruptorDispatcher.Publisher publisher() {
@@ -78,6 +96,15 @@ final class DisruptorEventImpl<T> implements DisruptorEvent<T>, Serializable {
         if (result == null) {
             result = extension.dispatcher(ringBufferName).publisher(qualifiers);
             publisher = result;
+        }
+        return result;
+    }
+
+    private CircuitBreakerState circuitBreaker() {
+        CircuitBreakerState result = circuitBreaker;
+        if (result == null) {
+            result = extension.dispatcher(ringBufferName).circuitBreaker();
+            circuitBreaker = result;
         }
         return result;
     }
@@ -92,7 +119,7 @@ final class DisruptorEventImpl<T> implements DisruptorEvent<T>, Serializable {
             childRingBufferName = ringBuffer.name();
         }
         return new DisruptorEventImpl<>(extension, childRingBufferName,
-            Qualifiers.merge(qualifiers, additionalQualifiers, extension.beanManager()));
+            Qualifiers.merge(qualifiers, additionalQualifiers, extension.beanManager()), circuitBreakerEnabled);
     }
 
     private void readObject(ObjectInputStream inputStream) throws IOException, ClassNotFoundException {

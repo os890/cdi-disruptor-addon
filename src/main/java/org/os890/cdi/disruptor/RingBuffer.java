@@ -56,7 +56,10 @@ import static java.lang.annotation.RetentionPolicy.RUNTIME;
  * <li>MicroProfile Config (if available):
  *     {@code cdi.disruptor.<name>.size}, {@code cdi.disruptor.<name>.wait-strategy} (class-name),
  *     {@code cdi.disruptor.<name>.producer-type} ({@code SINGLE} or {@code MULTI}),
- *     {@code cdi.disruptor.<name>.shutdown-timeout-ms}</li>
+ *     {@code cdi.disruptor.<name>.shutdown-timeout-ms},
+ *     {@code cdi.disruptor.<name>.circuit-breaker.failure-threshold},
+ *     {@code cdi.disruptor.<name>.circuit-breaker.delay-ms},
+ *     {@code cdi.disruptor.<name>.circuit-breaker.max-wait-ms} (see {@link CircuitBreaker})</li>
  * <li>beans implementing {@link DisruptorConfig}</li>
  * </ol>
  */

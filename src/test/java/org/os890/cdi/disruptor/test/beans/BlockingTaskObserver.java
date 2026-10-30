@@ -33,4 +33,8 @@ public class BlockingTaskObserver {
     void onCustom(@ObservesDisruptor @RingBuffer(name = "custom") BlockingTask task) throws InterruptedException {
         task.release().await();
     }
+
+    void onGuarded(@ObservesDisruptor @RingBuffer(name = "guarded") BlockingTask task) throws InterruptedException {
+        task.release().await();
+    }
 }
