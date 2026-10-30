@@ -1,0 +1,39 @@
+# Error files directory
+errors/
+
+# Team identity (local only)
+team.md
+
+# Build output
+target/
+
+# Runtime data (H2 database)
+/data/
+
+# Coverage artifacts
+coverage/
+full_coverage_report.html
+
+# Angular build output and cache
+apps/frontend/client/dist/
+apps/frontend/client/.angular/
+
+# Node.js
+node_modules/
+
+# Task planning (local only)
+next_task.md
+
+# IDE files
+.idea/
+
+
+# macOS
+.DS_Store
+
+# v2 bundle build output
+apps/bundle-v2/dist/
+apps/bundle-v2/runtime-data/
+
+# Portray data directory (bundle default ./portray-data, NFR-DEP-02)
+portray-data/
