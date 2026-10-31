@@ -57,6 +57,13 @@
             <artifactId>smallrye-config-core</artifactId>
             <scope>test</scope>
         </dependency>
+        <!-- only for the comparison with Eclipse Vert.x (AsyncCdiComparisonTest) -->
+        <dependency>
+            <groupId>io.vertx</groupId>
+            <artifactId>vertx-core</artifactId>
+            <version>${vertx.version}</version>
+            <scope>test</scope>
+        </dependency>
     </dependencies>
 
     <build>

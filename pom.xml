@@ -62,6 +62,7 @@
         <owb.version>4.0.3</owb.version>
         <junit.version>5.11.4</junit.version>
         <smallrye-config.version>3.10.2</smallrye-config.version>
+        <vertx.version>5.2.2</vertx.version>
 
         <checkstyle.version>10.26.1</checkstyle.version>
     </properties>
