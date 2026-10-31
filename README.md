@@ -29,15 +29,25 @@ cd cdi-disruptor-addon
 mvn install
 ```
 
-Add the dependency - the extension gets activated automatically:
+Add the dependency for your CDI container - the extension gets activated automatically:
 
 ```xml
+<!-- CDI Full (portable extension) - e.g. Weld, OpenWebBeans, Jakarta EE servers -->
 <dependency>
     <groupId>org.os890.cdi</groupId>
     <artifactId>cdi-disruptor-addon</artifactId>
     <version>1.0.0-SNAPSHOT</version>
 </dependency>
+
+<!-- CDI Lite (build-compatible extension) - e.g. Quarkus -->
+<dependency>
+    <groupId>org.os890.cdi</groupId>
+    <artifactId>cdi-disruptor-addon-lite</artifactId>
+    <version>1.0.0-SNAPSHOT</version>
+</dependency>
 ```
+
+The API and the usage are the same for both.
 
 Fire events:
 
@@ -77,8 +87,20 @@ public class OrderObserver {
 }
 ```
 
-Requirements: Java 17+, a CDI 4 container with support for portable extensions (CDI Full - e.g. Weld or
-OpenWebBeans), Disruptor 4 (`com.lmax:disruptor`, transitive dependency), MicroProfile Config is optional.
+Requirements: Java 17+, Disruptor 4 (`com.lmax:disruptor`, transitive dependency), MicroProfile Config is optional and
+
+* `cdi-disruptor-addon`: a CDI 4 container with support for portable extensions (CDI Full - e.g. Weld or
+  OpenWebBeans)
+* `cdi-disruptor-addon-lite`: a CDI 4.1 container with support for build-compatible extensions (CDI Lite -
+  e.g. Quarkus 3), see [CDI Lite](#cdi-lite-eg-quarkus)
+
+## Modules
+
+| module                     | content                                                                          |
+|----------------------------|----------------------------------------------------------------------------------|
+| `cdi-disruptor-addon-core` | API and container-independent runtime (transitive dependency of both extensions) |
+| `cdi-disruptor-addon`      | portable extension (CDI Full)                                                     |
+| `cdi-disruptor-addon-lite` | build-compatible extension (CDI Lite) - tested with Quarkus                      |
 
 ## How it works
 
@@ -325,8 +347,29 @@ Busy-spin, yielding and sleeping wait-strategies keep the observer threads busy 
 (measured without events: ~100% of a core per observer method with `YieldingWaitStrategy`, ~40% with
 `SleepingWaitStrategy`, ~0% with the default `BlockingWaitStrategy`) - use them only for ring-buffers which need it.
 
-Run it via `mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false`
+Run it via
+`mvn test -pl cdi-disruptor-addon -am -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false`
 (add `-Powb` for OpenWebBeans).
+
+## CDI Lite (e.g. Quarkus)
+
+`cdi-disruptor-addon-lite` processes everything during the build (build-compatible extension):
+
+* the qualifiers of `DisruptorEvent` injection points get replaced by an internal qualifier and the beans for
+  them get added as synthetic beans
+* observer methods get invoked via CDI 4.1 invokers (instance- and argument-lookup by the container -
+  no reflection)
+* the ring-buffers get started by the `Startup` event and stopped (incl. pending events) by the `Shutdown` event
+* `@ObservesDisruptor(requestContext = true)` adds `@ActivateRequestContext` to the observer method
+* configuration via `@RingBuffer`, MicroProfile Config (e.g. `application.properties` of Quarkus) and
+  `DisruptorConfig` beans works like with the portable extension
+
+Additional restrictions:
+
+* `requestContext = true` isn't supported for static observer methods (interceptors don't apply to them)
+* private observer methods and arrays as event types aren't supported
+* invalid definitions get reported as build errors
+* native images aren't tested yet (observed types and wait-strategies get loaded by class-name)
 
 ## Restrictions
 
@@ -344,13 +387,16 @@ Run it via `mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIf
 ## Build
 
 ```
-mvn verify          # tests with Weld (with and without MicroProfile Config)
-mvn verify -Powb    # tests with OpenWebBeans (with and without MicroProfile Config)
-mvn test -Dtest=ThroughputTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false           # manual throughput check
-mvn test -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false   # comparison with CDI async events
+mvn verify          # portable extension tested with Weld (with and without MicroProfile Config),
+                    # build-compatible extension tested with Quarkus
+mvn verify -Powb    # portable extension tested with OpenWebBeans (with and without MicroProfile Config)
+
+# manual performance checks of the portable extension
+mvn test -pl cdi-disruptor-addon -am -Dtest=ThroughputTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false
+mvn test -pl cdi-disruptor-addon -am -Dtest=AsyncCdiComparisonTest -Dperf=true -Dsurefire.failIfNoSpecifiedTests=false
 ```
 
-Apache RAT (license headers) and Checkstyle (`src/build/checkstyle.xml`) run in the `validate` phase.
+Apache RAT (license headers of all modules) and Checkstyle (`src/build/checkstyle.xml`) run in the `validate` phase.
 
 ## License
 

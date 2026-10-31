@@ -20,12 +20,12 @@
     <modelVersion>4.0.0</modelVersion>
 
     <groupId>org.os890.cdi</groupId>
-    <artifactId>cdi-disruptor-addon</artifactId>
+    <artifactId>cdi-disruptor-addon-parent</artifactId>
     <version>1.0.0-SNAPSHOT</version>
-    <packaging>jar</packaging>
+    <packaging>pom</packaging>
 
-    <name>cdi-disruptor-addon</name>
-    <description>Portable CDI extension which dispatches events via the LMAX Disruptor</description>
+    <name>cdi-disruptor-addon-parent</name>
+    <description>CDI addon which dispatches events via the LMAX Disruptor</description>
     <url>https://github.com/os890/cdi-disruptor-addon</url>
 
     <licenses>
@@ -42,88 +42,129 @@
         <developerConnection>scm:git:https://github.com/os890/cdi-disruptor-addon.git</developerConnection>
     </scm>
 
+    <modules>
+        <!-- API and container-independent runtime -->
+        <module>cdi-disruptor-addon-core</module>
+        <!-- portable extension (CDI Full) -->
+        <module>cdi-disruptor-addon</module>
+        <!-- build-compatible extension (CDI Lite, e.g. Quarkus) -->
+        <module>cdi-disruptor-addon-lite</module>
+    </modules>
+
     <properties>
         <project.build.sourceEncoding>UTF-8</project.build.sourceEncoding>
         <maven.compiler.release>17</maven.compiler.release>
 
         <cdi-api.version>4.0.1</cdi-api.version>
         <disruptor.version>4.0.0</disruptor.version>
+        <microprofile-config.version>3.1</microprofile-config.version>
         <weld.version>5.1.4.Final</weld.version>
         <owb.version>4.0.3</owb.version>
-        <microprofile-config.version>3.1</microprofile-config.version>
         <junit.version>5.11.4</junit.version>
         <smallrye-config.version>3.10.2</smallrye-config.version>
 
         <checkstyle.version>10.26.1</checkstyle.version>
     </properties>
 
-    <dependencies>
-        <dependency>
-            <groupId>jakarta.enterprise</groupId>
-            <artifactId>jakarta.enterprise.cdi-api</artifactId>
-            <version>${cdi-api.version}</version>
-            <scope>provided</scope>
-        </dependency>
-        <dependency>
-            <groupId>com.lmax</groupId>
-            <artifactId>disruptor</artifactId>
-            <version>${disruptor.version}</version>
-        </dependency>
-        <!-- optional - used for the configuration of ring-buffers if available -->
-        <dependency>
-            <groupId>org.eclipse.microprofile.config</groupId>
-            <artifactId>microprofile-config-api</artifactId>
-            <version>${microprofile-config.version}</version>
-            <scope>provided</scope>
-        </dependency>
-
-        <dependency>
-            <groupId>org.junit.jupiter</groupId>
-            <artifactId>junit-jupiter</artifactId>
-            <version>${junit.version}</version>
-            <scope>test</scope>
-        </dependency>
-        <dependency>
-            <groupId>io.smallrye.config</groupId>
-            <artifactId>smallrye-config-core</artifactId>
-            <version>${smallrye-config.version}</version>
-            <scope>test</scope>
-        </dependency>
-    </dependencies>
+    <dependencyManagement>
+        <dependencies>
+            <dependency>
+                <groupId>org.os890.cdi</groupId>
+                <artifactId>cdi-disruptor-addon-core</artifactId>
+                <version>${project.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>jakarta.enterprise</groupId>
+                <artifactId>jakarta.enterprise.cdi-api</artifactId>
+                <version>${cdi-api.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>com.lmax</groupId>
+                <artifactId>disruptor</artifactId>
+                <version>${disruptor.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.eclipse.microprofile.config</groupId>
+                <artifactId>microprofile-config-api</artifactId>
+                <version>${microprofile-config.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.junit.jupiter</groupId>
+                <artifactId>junit-jupiter</artifactId>
+                <version>${junit.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>io.smallrye.config</groupId>
+                <artifactId>smallrye-config-core</artifactId>
+                <version>${smallrye-config.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.jboss.weld.se</groupId>
+                <artifactId>weld-se-core</artifactId>
+                <version>${weld.version}</version>
+            </dependency>
+            <dependency>
+                <groupId>org.apache.openwebbeans</groupId>
+                <artifactId>openwebbeans-se</artifactId>
+                <version>${owb.version}</version>
+            </dependency>
+        </dependencies>
+    </dependencyManagement>
 
     <build>
-        <plugins>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-compiler-plugin</artifactId>
-                <version>3.13.0</version>
-            </plugin>
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-surefire-plugin</artifactId>
-                <version>3.5.2</version>
-                <executions>
-                    <!-- MicroProfile Config is optional - all tests have to pass without it -->
-                    <execution>
-                        <id>without-microprofile-config</id>
-                        <goals>
-                            <goal>test</goal>
-                        </goals>
-                        <configuration>
-                            <classpathDependencyExcludes>
-                                <classpathDependencyExclude>org.eclipse.microprofile.config:microprofile-config-api</classpathDependencyExclude>
-                            </classpathDependencyExcludes>
-                            <reportsDirectory>${project.build.directory}/surefire-reports-without-microprofile-config</reportsDirectory>
-                        </configuration>
-                    </execution>
-                </executions>
-            </plugin>
+        <pluginManagement>
+            <plugins>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-compiler-plugin</artifactId>
+                    <version>3.13.0</version>
+                </plugin>
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-surefire-plugin</artifactId>
+                    <version>3.5.2</version>
+                </plugin>
 
-            <!-- guard: every file needs an approved license header -->
+                <!-- guard: code style (incl. the license header of java files) - enabled by every module -->
+                <plugin>
+                    <groupId>org.apache.maven.plugins</groupId>
+                    <artifactId>maven-checkstyle-plugin</artifactId>
+                    <version>3.6.0</version>
+                    <dependencies>
+                        <dependency>
+                            <groupId>com.puppycrawl.tools</groupId>
+                            <artifactId>checkstyle</artifactId>
+                            <version>${checkstyle.version}</version>
+                        </dependency>
+                    </dependencies>
+                    <executions>
+                        <execution>
+                            <id>checkstyle-check</id>
+                            <phase>validate</phase>
+                            <goals>
+                                <goal>check</goal>
+                            </goals>
+                        </execution>
+                    </executions>
+                    <configuration>
+                        <configLocation>${project.basedir}/../src/build/checkstyle.xml</configLocation>
+                        <propertyExpansion>checkstyle.header.file=${project.basedir}/../src/build/license-header.txt</propertyExpansion>
+                        <includeTestSourceDirectory>true</includeTestSourceDirectory>
+                        <consoleOutput>true</consoleOutput>
+                        <failOnViolation>true</failOnViolation>
+                        <violationSeverity>warning</violationSeverity>
+                    </configuration>
+                </plugin>
+            </plugins>
+        </pluginManagement>
+
+        <plugins>
+            <!-- guard: every file of the whole project needs an approved license header (checked once at the root) -->
             <plugin>
                 <groupId>org.apache.rat</groupId>
                 <artifactId>apache-rat-plugin</artifactId>
                 <version>0.16.1</version>
+                <inherited>false</inherited>
                 <executions>
                     <execution>
                         <id>rat-check</id>
@@ -135,6 +176,7 @@
                 </executions>
                 <configuration>
                     <consoleOutput>true</consoleOutput>
+                    <excludeSubProjects>false</excludeSubProjects>
                     <excludes>
                         <exclude>LICENSE</exclude>
                         <exclude>.gitignore</exclude>
@@ -145,67 +187,6 @@
                     </excludes>
                 </configuration>
             </plugin>
-
-            <!-- guard: code style (incl. the license header of java files) -->
-            <plugin>
-                <groupId>org.apache.maven.plugins</groupId>
-                <artifactId>maven-checkstyle-plugin</artifactId>
-                <version>3.6.0</version>
-                <dependencies>
-                    <dependency>
-                        <groupId>com.puppycrawl.tools</groupId>
-                        <artifactId>checkstyle</artifactId>
-                        <version>${checkstyle.version}</version>
-                    </dependency>
-                </dependencies>
-                <executions>
-                    <execution>
-                        <id>checkstyle-check</id>
-                        <phase>validate</phase>
-                        <goals>
-                            <goal>check</goal>
-                        </goals>
-                    </execution>
-                </executions>
-                <configuration>
-                    <configLocation>${project.basedir}/src/build/checkstyle.xml</configLocation>
-                    <propertyExpansion>checkstyle.header.file=${project.basedir}/src/build/license-header.txt</propertyExpansion>
-                    <includeTestSourceDirectory>true</includeTestSourceDirectory>
-                    <consoleOutput>true</consoleOutput>
-                    <failOnViolation>true</failOnViolation>
-                    <violationSeverity>warning</violationSeverity>
-                </configuration>
-            </plugin>
         </plugins>
     </build>
-
-    <profiles>
-        <!-- mvn verify         -> tests with Weld
-             mvn verify -Powb   -> tests with OpenWebBeans -->
-        <profile>
-            <id>weld</id>
-            <activation>
-                <activeByDefault>true</activeByDefault>
-            </activation>
-            <dependencies>
-                <dependency>
-                    <groupId>org.jboss.weld.se</groupId>
-                    <artifactId>weld-se-core</artifactId>
-                    <version>${weld.version}</version>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-        <profile>
-            <id>owb</id>
-            <dependencies>
-                <dependency>
-                    <groupId>org.apache.openwebbeans</groupId>
-                    <artifactId>openwebbeans-se</artifactId>
-                    <version>${owb.version}</version>
-                    <scope>test</scope>
-                </dependency>
-            </dependencies>
-        </profile>
-    </profiles>
 </project>

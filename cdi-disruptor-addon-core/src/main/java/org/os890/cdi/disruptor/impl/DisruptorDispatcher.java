@@ -1,0 +1,323 @@
+/*
+ * Copyright 2026 os890
+ *
+ * Licensed under the Apache License, Version 2.0 (the "License");
+ * you may not use this file except in compliance with the License.
+ * You may obtain a copy of the License at
+ *
+ *     http://www.apache.org/licenses/LICENSE-2.0
+ *
+ * Unless required by applicable law or agreed to in writing, software
+ * distributed under the License is distributed on an "AS IS" BASIS,
+ * WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+ * See the License for the specific language governing permissions and
+ * limitations under the License.
+ */
+package org.os890.cdi.disruptor.impl;
+
+import com.lmax.disruptor.EventHandler;
+import com.lmax.disruptor.EventTranslatorTwoArg;
+import com.lmax.disruptor.ExceptionHandler;
+import com.lmax.disruptor.RingBuffer;
+import com.lmax.disruptor.TimeoutException;
+import com.lmax.disruptor.dsl.Disruptor;
+import jakarta.enterprise.context.control.RequestContextController;
+import org.os890.cdi.disruptor.RingBufferSettings;
+
+import java.lang.annotation.Annotation;
+import java.time.Duration;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.locks.LockSupport;
+import java.util.function.Supplier;
+import java.util.logging.Level;
+import java.util.logging.Logger;
+import java.util.stream.IntStream;
+
+/**
+ * Publishes events to a ring-buffer and notifies the observer methods of the ring-buffer.
+ * <p>
+ * Every observer method has its own {@link EventHandler} (thread) and its own entry in every slot of the
+ * ring-buffer: an event gets stored in the entries of the observer methods which observe it and every observer
+ * method clears its entry after the notification - therefore processed events don't stay referenced by the
+ * ring-buffer and no additional event-handler is needed for clearing slots.
+ * The observer methods which observe an event get resolved once per event-type and qualifiers
+ * (see {@link Publisher}).
+ * <p>
+ * Internal API - not intended to be used by applications.
+ */
+public final class DisruptorDispatcher {
+    private static final Logger LOG = Logger.getLogger(DisruptorDispatcher.class.getName());
+    // pause between attempts to publish an event with a max. wait-time
+    private static final long PUBLISH_RETRY_NANOS = 10_000;
+
+    private static final EventTranslatorTwoArg<EventSlot, Object, int[]> EVENT_TRANSLATOR =
+        (slot, sequence, payload, recipients) -> {
+            for (int recipient : recipients) {
+                slot.payloads[recipient] = payload;
+            }
+        };
+
+    private final List<DisruptorObserver> observerMethods;
+    private final Supplier<RequestContextController> requestContextControllerFactory;
+    private final RingBufferSettings settings;
+    private final Map<Set<Annotation>, Publisher> publishers = new ConcurrentHashMap<>();
+    private final CircuitBreakerState circuitBreaker;
+
+    private Disruptor<EventSlot> disruptor;
+    private volatile RingBuffer<EventSlot> ringBuffer;
+    private volatile boolean running;
+
+    /**
+     * @param observerMethods                 observer methods of the ring-buffer
+     * @param settings                        settings of the ring-buffer
+     * @param requestContextControllerFactory creates a {@link RequestContextController} for observer methods
+     *                                        which require an active request-context
+     */
+    public DisruptorDispatcher(List<? extends DisruptorObserver> observerMethods,
+                               RingBufferSettings settings,
+                               Supplier<RequestContextController> requestContextControllerFactory) {
+        this.observerMethods = List.copyOf(observerMethods);
+        this.requestContextControllerFactory = requestContextControllerFactory;
+        this.settings = settings;
+        this.circuitBreaker = new CircuitBreakerState(settings);
+    }
+
+    /**
+     * Starts the disruptor (if there are observer methods).
+     */
+    public synchronized void start() {
+        if (!observerMethods.isEmpty()) {
+            int observerCount = observerMethods.size();
+            disruptor = new Disruptor<>(() -> new EventSlot(observerCount), settings.ringBufferSize(),
+                    settings.threadFactory(), settings.producerType(), settings.waitStrategy());
+            disruptor.setDefaultExceptionHandler(new LoggingExceptionHandler());
+
+            ObserverEventHandler[] eventHandlers = new ObserverEventHandler[observerMethods.size()];
+            for (int i = 0; i < eventHandlers.length; i++) {
+                DisruptorObserver observerMethod = observerMethods.get(i);
+                eventHandlers[i] = new ObserverEventHandler(i, observerMethod, observerMethod.isCircuitBreakerEnabled()
+                        ? new ObserverCircuitBreaker(observerMethod.toString(), settings) : null);
+            }
+            disruptor.handleEventsWith(eventHandlers);
+            ringBuffer = disruptor.start();
+        }
+        running = true;
+    }
+
+    /**
+     * Stops accepting new events and waits (max. {@link RingBufferSettings#shutdownTimeout()})
+     * until all pending events are processed.
+     */
+    public synchronized void stop() {
+        if (!running) {
+            return;
+        }
+        running = false;
+
+        if (disruptor != null) {
+            Duration timeout = settings.shutdownTimeout();
+            try {
+                disruptor.shutdown(timeout.toMillis(), TimeUnit.MILLISECONDS);
+            } catch (TimeoutException e) {
+                LOG.warning("pending events of the ring-buffer '" + settings.name() + "' weren't processed within "
+                        + timeout + " - halting the disruptor");
+                disruptor.halt();
+            }
+        }
+    }
+
+    /**
+     * @param qualifiers normalized qualifiers of the events
+     * @return publisher for events with the given qualifiers (cached - the lookup is only needed once per
+     *         {@link org.os890.cdi.disruptor.DisruptorEvent} instance)
+     */
+    Publisher publisher(Set<Annotation> qualifiers) {
+        return publishers.computeIfAbsent(qualifiers, Publisher::new);
+    }
+
+    /**
+     * @return the circuit-breaker of this ring-buffer (only used by injection points with
+     *         {@link org.os890.cdi.disruptor.CircuitBreaker})
+     */
+    CircuitBreakerState circuitBreaker() {
+        return circuitBreaker;
+    }
+
+    /**
+     * Hot path of firing events - resolves the observers once per event-type and avoids allocations.
+     */
+    final class Publisher {
+        private final Set<Annotation> qualifiers;
+        // indexes of the observer methods which observe events of a type
+        private final Map<Class<?>, int[]> recipientsByEventType = new ConcurrentHashMap<>();
+
+        private Publisher(Set<Annotation> qualifiers) {
+            this.qualifiers = qualifiers;
+        }
+
+        /**
+         * @param event           the event
+         * @param waitForCapacity true to wait until there is a free slot
+         * @return true if the event was published (or if there is no observer for it)
+         */
+        boolean publish(Object event, boolean waitForCapacity) {
+            int[] recipients = recipientsOf(event);
+            if (recipients.length == 0) {
+                return true;
+            }
+            if (waitForCapacity) {
+                ringBuffer.publishEvent(EVENT_TRANSLATOR, event, recipients);
+                return true;
+            }
+            return ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients);
+        }
+
+        /**
+         * @param event        the event
+         * @param maxWaitNanos max. time to wait for a free slot
+         * @return true if the event was published within the given time (or if there is no observer for it)
+         */
+        boolean publish(Object event, long maxWaitNanos) {
+            int[] recipients = recipientsOf(event);
+            if (recipients.length == 0 || ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients)) {
+                return true;
+            }
+            long deadline = System.nanoTime() + maxWaitNanos;
+            while (System.nanoTime() - deadline < 0) {
+                LockSupport.parkNanos(PUBLISH_RETRY_NANOS);
+                if (ringBuffer.tryPublishEvent(EVENT_TRANSLATOR, event, recipients)) {
+                    return true;
+                }
+            }
+            return false;
+        }
+
+        private int[] recipientsOf(Object event) {
+            if (event == null) {
+                throw new IllegalArgumentException("the event must not be null");
+            }
+            if (!running) {
+                throw new IllegalStateException("the ring-buffer '" + settings.name() + "' isn't running");
+            }
+
+            Class<?> eventType = event.getClass();
+            int[] recipients = recipientsByEventType.get(eventType);
+            if (recipients == null) {
+                recipients = recipientsByEventType.computeIfAbsent(eventType, this::resolveRecipients);
+            }
+            return recipients;
+        }
+
+        private int[] resolveRecipients(Class<?> eventType) {
+            return IntStream.range(0, observerMethods.size())
+                .filter(index -> observerMethods.get(index).observes(eventType, qualifiers))
+                .toArray();
+        }
+    }
+
+    /**
+     * Entry of the ring-buffer with one payload-reference per observer method -
+     * null if the observer method doesn't observe the event or already processed it.
+     * <p>
+     * No additional synchronization is needed: the payloads get stored before the sequence gets published and
+     * an observer method clears its reference before its event-handler advances its sequence, which is required
+     * before the slot can be reused.
+     */
+    static final class EventSlot {
+        private final Object[] payloads;
+
+        EventSlot(int observerCount) {
+            this.payloads = new Object[observerCount];
+        }
+    }
+
+    private final class ObserverEventHandler implements EventHandler<EventSlot> {
+        private final int index;
+        private final DisruptorObserver observerMethod;
+        // null if the observer method doesn't use a circuit-breaker
+        private final ObserverCircuitBreaker circuitBreaker;
+
+        // only used by the thread of this handler (and only for observer methods which require it)
+        private RequestContextController requestContextController;
+
+        ObserverEventHandler(int index, DisruptorObserver observerMethod, ObserverCircuitBreaker circuitBreaker) {
+            this.index = index;
+            this.observerMethod = observerMethod;
+            this.circuitBreaker = circuitBreaker;
+        }
+
+        @Override
+        public void onEvent(EventSlot slot, long sequence, boolean endOfBatch) {
+            Object payload = slot.payloads[index];
+            if (payload == null) {
+                return;
+            }
+
+            try {
+                if (circuitBreaker != null && !circuitBreaker.allowsNotification()) {
+                    return;
+                }
+                if (observerMethod.isRequestContextRequired()) {
+                    notifyWithRequestContext(payload, sequence);
+                } else {
+                    notifyObserverMethod(payload, sequence);
+                }
+            } finally {
+                // releases the reference of this observer method - the event can be collected once all observer
+                // methods processed it
+                slot.payloads[index] = null;
+            }
+        }
+
+        private void notifyWithRequestContext(Object payload, long sequence) {
+            if (requestContextController == null) {
+                requestContextController = requestContextControllerFactory.get();
+            }
+            boolean activated = requestContextController.activate();
+            try {
+                notifyObserverMethod(payload, sequence);
+            } finally {
+                if (activated) {
+                    requestContextController.deactivate();
+                }
+            }
+        }
+
+        private void notifyObserverMethod(Object payload, long sequence) {
+            try {
+                observerMethod.notify(payload);
+            } catch (Exception e) {
+                LOG.log(Level.SEVERE, "observer method " + observerMethod + " failed to process event "
+                        + payload + " (sequence " + sequence + ")", e);
+                if (circuitBreaker != null) {
+                    circuitBreaker.onFailure();
+                }
+                return;
+            }
+            if (circuitBreaker != null) {
+                circuitBreaker.onSuccess();
+            }
+        }
+    }
+
+    private static final class LoggingExceptionHandler implements ExceptionHandler<EventSlot> {
+        @Override
+        public void handleEventException(Throwable throwable, long sequence, EventSlot slot) {
+            LOG.log(Level.SEVERE, "failed to process event with sequence " + sequence, throwable);
+        }
+
+        @Override
+        public void handleOnStartException(Throwable throwable) {
+            LOG.log(Level.SEVERE, "failed to start event-handler", throwable);
+        }
+
+        @Override
+        public void handleOnShutdownException(Throwable throwable) {
+            LOG.log(Level.SEVERE, "failed to stop event-handler", throwable);
+        }
+    }
+}
