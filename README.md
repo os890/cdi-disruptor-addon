@@ -276,6 +276,7 @@ Duration from firing the first event until the observer processed the last one, 
 | CDI `fireAsync` / `@ObservesAsync`                              |                - | 100% |         100% |
 | virtual thread per event (without CDI)                          |                - | 145% |          79% |
 | Apache Pekko actor (without CDI)                                |                - |  79% |          44% |
+| Eclipse Vert.x event-bus (without CDI)                          |                - |  33% |          23% |
 | `DisruptorEvent`, default config (`BlockingWaitStrategy`)       |             1024 |  51% |          31% |
 | `DisruptorEvent`, default config (`BlockingWaitStrategy`)       |            65536 |  50% |          26% |
 | `DisruptorEvent`, `@ObservesDisruptor(requestContext = true)`   |             1024 |  90% |          24% |
@@ -292,6 +293,9 @@ Duration from firing the first event until the observer processed the last one, 
 * Apache Pekko actor: one actor (default dispatcher and mailbox) which receives the events via `tell` -
   this variant is only part of the branch [`pekko-benchmark`](https://github.com/os890/cdi-disruptor-addon/tree/pekko-benchmark),
   because `main` is limited to CDI
+* Eclipse Vert.x event-bus: one verticle with a local event-bus consumer (event-loop thread) which receives the
+  events via `EventBus#send` (passed by reference, without back-pressure) - this variant is only part of the branch
+  [`vertx-benchmark`](https://github.com/os890/cdi-disruptor-addon/tree/vertx-benchmark)
 * plain Disruptor: the Disruptor used directly, without CDI - the slots reference the fired event objects
   (like this add-on) or the event data gets copied into the preallocated slots (idiomatic zero-allocation usage)
 * the variants without CDI don't depend on the CDI container - their percentages only differ between the columns,
@@ -311,9 +315,9 @@ config:
 ---
 xychart-beta horizontal
     title "Weld"
-    x-axis ["CDI async events", "virtual thread per event", "Pekko actor", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
+    x-axis ["CDI async events", "virtual thread per event", "Pekko actor", "Vert.x event-bus", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
     y-axis "throughput (CDI async events = 1)" 0 --> 8
-    bar [1.0, 0.7, 1.3, 2.0, 2.0, 1.1, 6.0, 5.9, 6.1, 6.1, 2.1, 2.5, 5.5, 6.9]
+    bar [1.0, 0.7, 1.3, 3.0, 2.0, 2.0, 1.1, 6.0, 5.9, 6.1, 6.1, 2.1, 2.5, 5.5, 6.9]
 ```
 
 ```mermaid
@@ -328,15 +332,15 @@ config:
 ---
 xychart-beta horizontal
     title "OpenWebBeans"
-    x-axis ["CDI async events", "virtual thread per event", "Pekko actor", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
+    x-axis ["CDI async events", "virtual thread per event", "Pekko actor", "Vert.x event-bus", "Blocking (default), 1024", "Blocking, 65536", "Blocking, 1024, request-context", "Yielding, 1024", "Yielding, 65536", "Sleeping, 65536", "LiteBlocking, 65536", "plain: Blocking, 1024", "plain: Blocking, 1024, prealloc.", "plain: Yielding, 65536", "plain: Yielding, 65536, prealloc."]
     y-axis "throughput (CDI async events = 1)" 0 --> 30
-    bar [1.0, 1.3, 2.3, 3.2, 3.9, 4.1, 16.7, 27.0, 29.2, 16.1, 3.6, 4.6, 10.4, 11.5]
+    bar [1.0, 1.3, 2.3, 4.4, 3.2, 3.9, 4.1, 16.7, 27.0, 29.2, 16.1, 3.6, 4.6, 10.4, 11.5]
 ```
 
 **This isn't a representative measurement - it's just an orientation of what to expect.**
 The numbers depend on the hardware, JVM, CDI container, the observer and the configuration.
 Measured with 2M events, one producer thread and one observer - every variant in its own JVM
-(median of 5 rounds after 2 warmup rounds, median of 4-5 JVM runs) with Weld 5.1 and OpenWebBeans 4.0.
+(median of 5 rounds after 2 warmup rounds, median of 4-6 JVM runs) with Weld 5.1 and OpenWebBeans 4.0.
 The results of the fastest variants vary considerably between the runs.
 A larger ring-buffer only helps if the observer can keep up with the producer (it absorbs bursts,
 so the producer doesn't have to wait for free slots) - it doesn't speed up a slow observer,
